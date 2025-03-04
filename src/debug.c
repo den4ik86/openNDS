@@ -21,6 +21,7 @@
 /** @file debug.c
     @brief Debug output routines
     @author Copyright (C) 2004 Philippe April <papril777@yahoo.com>
+    @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
 */
 
 #include <stdio.h>
@@ -40,6 +41,7 @@ static int do_log(int level, int debuglevel) {
 	switch (level) {
 		case LOG_EMERG:
 		case LOG_ERR:
+		case LOG_CRIT:
 			// quiet
 			return (debuglevel >= 0);
 		case LOG_WARNING:
@@ -63,10 +65,8 @@ Do not use directly, use the debug macro */
 void
 _debug(const char filename[], int line, int level, const char *format, ...)
 {
-	char buf[28];
 	va_list vlist;
 	s_config *config;
-	FILE *out;
 	time_t ts;
 	sigset_t block_chld;
 
@@ -79,26 +79,11 @@ _debug(const char filename[], int line, int level, const char *format, ...)
 		sigaddset(&block_chld, SIGCHLD);
 		sigprocmask(SIG_BLOCK, &block_chld, NULL);
 
-		if (config->daemon) {
-			out = stdout;
-		} else {
-			out = stderr;
-		}
-
-		fprintf(out, "[%d][%.24s][%u](%s:%d) ", level, format_time(ts, buf), getpid(), filename, line);
+		openlog("opennds", LOG_PID, LOG_DAEMON);
 		va_start(vlist, format);
-		vfprintf(out, format, vlist);
+		vsyslog(level, format, vlist);
 		va_end(vlist);
-		fputc('\n', out);
-		fflush(out);
-
-		if (config->log_syslog) {
-			openlog("opennds", LOG_PID, config->syslog_facility);
-			va_start(vlist, format);
-			vsyslog(level, format, vlist);
-			va_end(vlist);
-			closelog();
-		}
+		closelog();
 
 		sigprocmask(SIG_UNBLOCK, &block_chld, NULL);
 	}

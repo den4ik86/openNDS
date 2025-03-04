@@ -22,6 +22,7 @@
   @brief Client List Functions
   @author Copyright (C) 2004 Alexandre Carmel-Veillex <acv@acv.ca>
   @author Copyright (C) 2007 Paul Kube <nodogsplash@kokoro.ucsd.edu>
+  @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
  */
 
 #define _GNU_SOURCE
@@ -39,6 +40,7 @@
 #include "safe.h"
 #include "debug.h"
 #include "conf.h"
+#include "common.h"
 #include "client_list.h"
 #include "http_microhttpd.h"
 #include "fw_iptables.h"
@@ -110,25 +112,24 @@ _client_list_append(const char mac[], const char ip[])
 		client = client->next;
 	}
 
-	client = safe_malloc(sizeof(t_client));
-	memset(client, 0, sizeof(t_client));
+	client = safe_calloc(sizeof(t_client));
 
 	client->mac = safe_strdup(mac);
 	client->ip = safe_strdup(ip);
 
-	// Reset volatile fields
+	// Reset volatile fields and create new token
 	client_reset(client);
 
-	// Blocked or Trusted client do not trigger the splash page.
-	if (is_blocked_mac(mac)) {
-		client->fw_connection_state = FW_MARK_BLOCKED;
-	} else if(is_allowed_mac(mac) || is_trusted_mac(mac)) {
+	// Trusted client does not trigger the splash page.
+	if (is_trusted_mac(mac)) {
 		client->fw_connection_state = FW_MARK_TRUSTED;
 	} else {
 		client->fw_connection_state = FW_MARK_PREAUTHENTICATED;
 	}
 
 	client->id = client_id;
+	client->out_packet_limit = 0;
+	client->inc_packet_limit = 0;
 
 	debug(LOG_NOTICE, "Adding %s %s token %s to client list",
 		client->ip, client->mac, client->token ? client->token : "none");
@@ -150,18 +151,52 @@ _client_list_append(const char mac[], const char ip[])
  */
 void client_reset(t_client *client)
 {
+	char *hash;
+	char *msg;
+	char *cidinfo;
+
+	debug(LOG_DEBUG, "Resetting client [%s]", client->mac);
 	// Reset traffic counters
 	client->counters.incoming = 0;
 	client->counters.outgoing = 0;
 	client->counters.last_updated = time(NULL);
 
-	// Reset seesion time
+	// Reset session time
 	client->session_start = 0;
 	client->session_end = 0;
 
-	// Reset token
-	free(client->token);
-	safe_asprintf(&client->token, "%04hx%04hx", rand16(), rand16());
+	// Reset token and hid
+	hash = safe_calloc(STATUS_BUF);
+	client->token = safe_calloc(STATUS_BUF);
+	safe_snprintf(client->token, STATUS_BUF, "%04hx%04hx", rand16(), rand16());
+	hash_str(hash, STATUS_BUF, client->token);
+	client->hid = safe_strdup(hash);
+	free(hash);
+
+	// Reset custom, client_type and cpi_query
+	client->custom = safe_calloc(MID_BUF);
+	client->client_type = safe_calloc(STATUS_BUF);
+
+	if (!client->cpi_query) {
+		client->cpi_query = safe_calloc(STATUS_BUF);
+	}
+
+	//Reset cid and remove cidfile using rmcid
+	if (client->cid) {
+
+		if (strlen(client->cid) > 0) {
+			msg = safe_calloc(SMALL_BUF);
+			cidinfo = safe_calloc(MID_BUF);
+			safe_snprintf(cidinfo, MID_BUF, "cid=\"%s\"", client->cid);
+			write_client_info(msg, SMALL_BUF, "rmcid", client->cid, cidinfo);
+			free(msg);
+			free(cidinfo);
+		}
+	}
+
+	free(client->cid);
+	client->cid = safe_calloc(SMALL_BUF);
+
 }
 
 /**
@@ -175,6 +210,10 @@ client_list_add_client(const char mac[], const char ip[])
 {
 	t_client *client;
 
+	int rc = -1;
+	char *libcmd;
+	char *msg;
+
 	if (!check_mac_format(mac)) {
 		// Inappropriate format in IP address
 		debug(LOG_NOTICE, "Illegal MAC format [%s]", mac);
@@ -187,8 +226,24 @@ client_list_add_client(const char mac[], const char ip[])
 		return NULL;
 	}
 
+	// check if client ip was allocated by dhcp
+	libcmd = safe_calloc(SMALL_BUF);
+	safe_snprintf(libcmd, SMALL_BUF, "/usr/lib/opennds/libopennds.sh dhcpcheck \"%s\"", ip);
+	msg = safe_calloc(SMALL_BUF);
+	rc = execute_ret_url_encoded(msg, SMALL_BUF, libcmd);
+	free(libcmd);
+	free(msg);
+
+	if (rc > 0) {
+		// IP address is not in the dhcp database
+		debug(LOG_NOTICE, "IP not allocated by dhcp [%s]", ip);
+		return NULL;
+	}
+
 	client = client_list_find(mac, ip);
+
 	if (!client) {
+		// add the client
 		client = _client_list_append(mac, ip);
 	} else {
 		debug(LOG_INFO, "Client %s %s token %s already on client list", ip, mac, client->token);
@@ -198,7 +253,7 @@ client_list_add_client(const char mac[], const char ip[])
 }
 
 /** Finds a client by its token, IP or MAC.
- * A found client is guaranted to be unique.
+ * A found client is guaranteed to be unique.
  * @param ip IP we are looking for in the linked list
  * @param mac MAC we are looking for in the linked list
  * @return Pointer to the client, or NULL if not found
@@ -311,12 +366,41 @@ t_client *
 client_list_find_by_token(const char token[])
 {
 	t_client *ptr;
+	s_config *config;
+	config = config_get_config();
+	char *rhid;
+	char *rhidraw = NULL;
 
 	ptr = firstclient;
+
 	while (ptr) {
-		if (!strcmp(ptr->token, token)) {
-			return ptr;
+		//Check if token (tok) or hash_id (hid) mode
+		if (strlen(token) > 8) {
+			// hid mode
+			rhidraw = safe_calloc(SMALL_BUF);
+			safe_snprintf(rhidraw, SMALL_BUF, "%s%s", ptr->hid, config->fas_key);
+
+			rhid = safe_calloc(SMALL_BUF);
+			hash_str(rhid, SMALL_BUF, rhidraw);
+
+			free(rhidraw);
+
+			if (token && !strcmp(rhid, token)) {
+				// rhid is valid
+				free (rhid);
+				return ptr;
+			}
+
+			free(rhid);
+
+		} else {
+			// tok mode
+			if (token && !strcmp(ptr->token, token)) {
+				// Token is valid
+				return ptr;
+			}
 		}
+
 		ptr = ptr->next;
 	}
 
@@ -332,14 +416,34 @@ client_list_find_by_token(const char token[])
 static void
 _client_list_free_node(t_client *client)
 {
-	if (client->mac)
-		free(client->mac);
 
-	if (client->ip)
-		free(client->ip);
+	char *msg;
+	char *cidinfo;
 
-	if (client->token)
-		free(client->token);
+	if (client->cid) {
+
+		// Remove any existing cidfile:
+		if (strlen(client->cid) > 0) {
+			msg = safe_calloc(SMALL_BUF);
+			cidinfo = safe_calloc(MID_BUF);
+			safe_snprintf(cidinfo, MID_BUF, "cid=\"%s\"", client->cid);
+			write_client_info(msg, SMALL_BUF, "rmcid", client->cid, cidinfo);
+			free(msg);
+			free(cidinfo);
+		}
+	}
+
+	free(client->ip);
+	free(client->mac);
+	free(client->token);
+	free(client->hid);
+	free(client->cid);
+	free(client->custom);
+	free(client->client_type);
+
+	if (strcmp(client->cpi_query, "") == 0) {
+		free(client->cpi_query);
+	}
 
 	free(client);
 }

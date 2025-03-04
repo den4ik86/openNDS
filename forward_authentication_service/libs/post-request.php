@@ -1,12 +1,21 @@
 <?php
-//Copyright (C) BlueWave Projects and Services 2016-2020
+#Copyright (C) BlueWave Projects and Services 2016-2024
+#This software is released under the GNU GPL license.
 
 if (isset($argv[1])) {$remote_url=$argv[1];} else {echo "missing argument\n"; exit(1);}
 if (isset($argv[2])) {$action=$argv[2];} else {echo "missing argument\n"; exit(1);}
 if (isset($argv[3])) {$gatewayhash=$argv[3];} else {echo "missing argument\n"; exit(1);}
 if (isset($argv[4])) {$user_agent=$argv[4];} else {echo "missing argument\n"; exit(1);}
+if (isset($argv[5])) {$payload=$argv[5];} else {$payload="none";}
 
-$_p = array("auth_get"=>$action,"gatewayhash"=>$gatewayhash);
+$payload=base64_encode($payload);
+
+$_p = array (
+	"auth_get"=>$action,
+	"gatewayhash"=>$gatewayhash,
+	"payload"=>$payload
+);
+
 $response=SendPostData($_p, $remote_url, $user_agent);
 echo "$response";
 
@@ -26,13 +35,16 @@ function SendPostData($_p, $remote_url, $user_agent) {
 	$context = stream_context_create($context_options);
 
 	//open the stream and get the response
-	$fp = @fopen($remote_url, 'r', false, $context);
+	$fp = fopen($remote_url, 'r', false, $context);
+	$response = "";
 
 	if ($fp == TRUE) {
-		$response = stream_get_contents($fp);
+		$response = trim(stream_get_contents($fp));
+	} else {
+		return "ERROR: Failed_to_open_stream_to: [$remote_url]";
 	}
-
 	return $response;
+
 }
 
 ?>

@@ -21,31 +21,142 @@
 /** @file ndsctl.c
     @brief Monitoring and control of opennds, client part
     @author Copyright (C) 2004 Alexandre Carmel-Veilleux <acv@acv.ca>
-    trivially modified for opennds
+    @author Copyright (C) 2021 ndsctl_lock() and ndsctl_unlock() based on code by Linus Lüssing <ll@simonwunderlich.de>
+    @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
 */
 
 #define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <string.h>
-#include <stdarg.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <syslog.h>
 #include <errno.h>
+#include <ctype.h>
 
 #include "ndsctl.h"
+#include "common.h"
 
+int safe_asprintf(char **strp, const char *fmt, ...);
+int safe_vasprintf(char **strp, const char *fmt, va_list ap);
 
 struct argument {
 	const char *cmd;
 	const char *ifyes;
 	const char *ifno;
 };
+
+int safe_asprintf(char **strp, const char *fmt, ...)
+{
+	va_list ap;
+	int retval;
+
+	va_start(ap, fmt);
+	retval = safe_vasprintf(strp, fmt, ap);
+	va_end(ap);
+
+	return (retval);
+}
+
+int safe_vasprintf(char **strp, const char *fmt, va_list ap)
+{
+	int retval;
+
+	retval = vasprintf(strp, fmt, ap);
+
+	if (retval == -1) {
+		printf("Failed: Memory allocation error");
+		exit (1);
+	}
+
+	return (retval);
+}
+
+int b64decode(char *buf, int blen, const void *src, int slen)
+{
+	const unsigned char *str = src;
+	unsigned int cout = 0;
+	unsigned int cin = 0;
+	int len = 0;
+	int i = 0;
+
+	for (i = 0; (i <= slen) && (str[i] != 0); i++) {
+		cin = str[i];
+
+		if ((cin >= '0') && (cin <= '9'))
+			cin = cin - '0' + 52;
+		else if ((cin >= 'A') && (cin <= 'Z'))
+			cin = cin - 'A';
+		else if ((cin >= 'a') && (cin <= 'z'))
+			cin = cin - 'a' + 26;
+		else if (cin == '+')
+			cin = 62;
+		else if (cin == '/')
+			cin = 63;
+		else if (cin == '=')
+			cin = 0;
+		else
+			continue;
+
+		cout = (cout << 6) | cin;
+
+		if ((i % 4) != 3)
+			continue;
+
+		if ((len + 3) >= blen)
+			break;
+
+		buf[len++] = (char)(cout >> 16);
+		buf[len++] = (char)(cout >> 8);
+		buf[len++] = (char)(cout);
+	}
+
+	buf[len++] = 0;
+	return len;
+}
+
+int b64encode(char *buf, int blen, const char *src, int slen)
+{
+	int  i;
+	int  v;
+	int len = 0;
+	const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+	for (i=0, len=0; i<slen; i+=3, len+=4) {
+		if ((len+4) <= blen) {
+			v = src[i];
+			v = i+1 < slen ? v << 8 | src[i+1] : v << 8;
+			v = i+2 < slen ? v << 8 | src[i+2] : v << 8;
+
+			buf[len]   = b64chars[(v >> 18) & 0x3F];
+			buf[len+1] = b64chars[(v >> 12) & 0x3F];
+
+			if (i+1 < slen) {
+				buf[len+2] = b64chars[(v >> 6) & 0x3F];
+			} else {
+				buf[len+2] = '=';
+			}
+
+			if (i+2 < slen) {
+				buf[len+3] = b64chars[v & 0x3F];
+			} else {
+				buf[len+3] = '=';
+			}
+		} else {
+			break;
+		}
+	}
+
+	return (i == slen) ? (len + 4) : -1;
+}
+
 
 /** @internal
  * @brief Print usage
@@ -59,41 +170,58 @@ usage(void)
 		"Usage: ndsctl [options] command [arguments]\n"
 		"\n"
 		"options:\n"
-		"  -s <path>           Path to the socket\n"
+		"  -s <path>           Deprecated and ignored - Path to the socket, config setting is used instead\n"
 		"  -h                  Print usage\n"
 		"\n"
 		"commands:\n"
-		"  status              View the status of opennds\n"
-		"  clients             Display machine-readable client list\n"
-		"  json [mac|ip|token] Display client list in json format\n"
-		"  stop                Stop the running opennds\n"
-		"  auth mac|ip|token   Authenticate user with specified mac, ip or token\n"
-		"  deauth mac|ip|token Deauthenticate user with specified mac, ip or token\n"
-		"  block mac           Block the given MAC address\n"
-		"  unblock mac         Unblock the given MAC address\n"
-		"  allow mac           Allow the given MAC address\n"
-		"  unallow mac         Unallow the given MAC address\n"
-		"  trust mac           Trust the given MAC address\n"
-		"  untrust mac         Untrust the given MAC address\n"
-		"  debuglevel n        Set debug level to n\n"
+		"  status\n"
+		"	View the status of opennds\n\n"
+		"  json	mac|ip|token(optional)\n"
+		"	Display client list in json format\n"
+		"	mac|ip|token is optional, if not specified, all clients are listed\n\n"
+		"  stop\n"
+		"	Stop the running opennds\n\n"
+		"  auth mac|ip|token sessiontimeout(minutes) uploadrate(kb/s) downloadrate(kb/s) uploadquota(kB) downloadquota(kB) customstring\n"
+		"	Authenticate client with specified mac, ip or token\n"
+		"\n"
+		"	sessiontimeout sets the session duration. Unlimited if 0, defaults to global setting if null (double quotes).\n"
+		"	The client will be deauthenticated once the sessiontimout period has passed.\n"
+		"\n"
+		"	uploadrate and downloadrate are the maximum allowed data rates. Unlimited if 0, global setting if null (\"\").\n"
+		"\n"
+		"	uploadquota and downloadquota are the maximum volumes of data allowed. Unlimited if 0, global setting if null (\"\").\n"
+		"\n"
+		"	customstring is a custom string that will be passed to BinAuth.\n"
+		"\n"
+		"	Example: ndsctl auth 10.13.1.138 1400 300 1500 500000 1000000 \"This is a Custom String\"\n"
+		"\n"
+		"  deauth mac|ip|token\n"
+		"	Deauthenticate user with specified mac, ip or token\n\n"
+		"  trust mac\n"
+		"	Trust the given MAC address\n\n"
+		"  untrust mac\n"
+		"	Untrust the given MAC address\n\n"
+		"  debuglevel n\n"
+		"	Set debug level to n (0=silent, 1=Normal, 2=Info, 3=debug)\n\n"
+		"  b64decode \"string_to_decode\"\n"
+		"	Base 64 decode the given string\n\n"
+		"  b64encode \"string_to_encode\"\n"
+		"	Base 64 encode the given string\n"
 		"\n"
 	);
 }
 
 static struct argument arguments[] = {
-	{"clients", NULL, NULL},
 	{"json", NULL, NULL},
 	{"status", NULL, NULL},
 	{"stop", NULL, NULL},
 	{"debuglevel", "Debug level set to %s.\n", "Failed to set debug level to %s.\n"},
 	{"deauth", "Client %s deauthenticated.\n", "Client %s not found.\n"},
 	{"auth", "Client %s authenticated.\n", "Failed to authenticate client %s.\n"},
-	{"block", "MAC %s blocked.\n", "Failed to block MAC %s.\n"},
-	{"unblock", "MAC %s unblocked.\n", "Failed to unblock MAC %s.\n"},
-	{"allow", "MAC %s allowed.\n", "Failed to allow MAC %s.\n"},
-	{"unallow", "MAC %s unallowed.\n", "Failed to unallow MAC %s.\n"},
 	{"trust", "MAC %s trusted.\n", "Failed to trust MAC %s.\n"},
 	{"untrust", "MAC %s untrusted.\n", "Failed to untrust MAC %s.\n"},
+	{"b64decode", NULL, NULL},
+	{"b64encode", NULL, NULL},
 	{NULL, NULL, NULL}
 };
 
@@ -124,7 +252,7 @@ connect_to_server(const char sock_name[])
 	strncpy(sa_un.sun_path, sock_name, (sizeof(sa_un.sun_path) - 1));
 
 	if (connect(sock, (struct sockaddr *)&sa_un, strlen(sa_un.sun_path) + sizeof(sa_un.sun_family))) {
-		fprintf(stderr, "ndsctl: opennds probably not started (Error: %s)\n", strerror(errno));
+		fprintf(stderr, "ndsctl: opennds probably not yet started (Error: %s)\n", strerror(errno));
 		remove(lockfile);
 		return -1;
 	}
@@ -159,19 +287,19 @@ static int
 ndsctl_do(const char *socket, const struct argument *arg, const char *param)
 {
 	int sock;
-	char buffer[4096];
-	char request[128];
+	char buffer[MAX_BUF] = {0};
+	char request[MAX_BUF *4 /3] = {0};
 	int len, rlen;
 	int ret;
 
-	setlogmask(LOG_UPTO (LOG_NOTICE));
+	//setlogmask(LOG_UPTO (LOG_NOTICE));
 	sock = connect_to_server(socket);
 
 	if (sock < 0) {
 		return 3;
 	}
 
-	if (param) {
+	if (strlen(param) > 0) {
 		snprintf(request, sizeof(request), "%s %s\r\n\r\n", arg->cmd, param);
 	} else {
 		snprintf(request, sizeof(request), "%s\r\n\r\n", arg->cmd);
@@ -213,78 +341,186 @@ ndsctl_do(const char *socket, const struct argument *arg, const char *param)
 	return ret;
 }
 
+int ndsctl_lock(char *mountpoint, int *lockfd)
+{
+	char *lockfile;
+
+	// Open or create the lock file
+	safe_asprintf(&lockfile, "%s/ndsctl.lock", mountpoint);
+	*lockfd = open(lockfile, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+	free(lockfile);
+
+	if (*lockfd < 0) {
+		// Critical error - must report to syslog
+		openlog ("ndsctl", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
+		syslog (LOG_ERR, "CRITICAL ERROR - Unable to open [%s]", lockfile);
+		closelog ();
+		return 5;
+	}
+
+
+	if (lockf(*lockfd, F_TLOCK, 0) == 0) {
+		return 0;
+	} else {
+
+		if (errno != EACCES && errno != EAGAIN) {
+			// persistent error
+			// This is a Critical error - must report to syslog
+			openlog ("ndsctl", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
+			syslog (LOG_ERR, "CRITICAL ERROR - Unable to create lock on [%s]", lockfile);
+			closelog ();
+			close(*lockfd);
+			return 6;
+		}
+
+		// This is a normal operating state, no need to report to syslog
+		// It is the responsibility of the caller to check return code and retry if required
+		close(*lockfd);
+
+		printf("ndsctl thread is busy, please try later.\n");
+
+		return 4;
+	}
+}
+
+void ndsctl_unlock(int *lockfd)
+{
+	if (lockf(*lockfd, F_ULOCK, 0) < 0) {
+		printf(" Error - Unable to Unlock ndsctl/n");
+	}
+
+	close(*lockfd);
+}
+
+
 int
 main(int argc, char **argv)
 {
 	const struct argument* arg;
-	const char *socket;
+	char *socket;
 	int i = 1;
+	int counter;
+	char args[256] = {0};
+	char argi[128] = {0};
+	char str_b64[QUERYMAXLEN] = {0};
+	char mountpoint[128] = {0};
+	char socket_file[128] = {0};
+	char *cmd;
 	int ret;
-	char lockfile[] = "/tmp/ndsctl.lock";
-	char line[128] = {0};
+	int lockfd;
 	FILE *fd;
 
-	if ((fd = fopen(lockfile, "r")) != NULL) {
-		openlog ("ndsctl", LOG_CONS | LOG_PID | LOG_NDELAY, LOG_LOCAL1);
-		syslog (LOG_NOTICE, "ndsctl is locked by another process");
-		printf ("ndsctl is locked by another process\n");
-		closelog ();
-		fclose(fd);
-		return 0;
-	} else {
-		//Create lock
-		fd = fopen(lockfile, "w");
-	}
-
-
-	socket = strdup(DEFAULT_SOCK);
+	// check arguments and take action:
 
 	if (argc <= i) {
 		usage();
-		fclose(fd);
-		remove(lockfile);
-		return 0;
-	}
-
-	if (strcmp(argv[1], "-h") == 0) {
-		usage();
-		fclose(fd);
-		remove(lockfile);
 		return 1;
 	}
 
 	if (strcmp(argv[1], "-s") == 0) {
-		if (argc >= 2) {
-			socket = strdup(argv[2]);
+		if (argc >= 4) {
+			// -s option is deprecated - using config setting instead
+			//socket = strdup(argv[2]);
 			i = 3;
 		} else {
 			usage();
-			fclose(fd);
-			remove(lockfile);
 			return 1;
 		}
 	}
 
-	// Too many arguments
-	if (argc > (i+2)) {
-		usage();
-		fclose(fd);
-		remove(lockfile);
-		return 1;
+	if (strcmp(argv[i], "b64decode") == 0) {
+		if(argv[i+1] == NULL) {
+			return 1;
+		} else {
+			b64decode(str_b64, sizeof(str_b64), argv[i+1], strlen(argv[i+1]));
+			printf("%s", str_b64);
+			return 0;
+		}
 	}
 
+	if (strcmp(argv[i], "b64encode") == 0) {
+		if(argv[i+1] == NULL) {
+			return 1;
+		} else {
+			b64encode(str_b64, sizeof(str_b64), argv[i+1], strlen(argv[i+1]));
+			printf("%s", str_b64);
+			return 0;
+		}
+	}
+
+
+	if (strcmp(argv[1], "-h") == 0) {
+		usage();
+		return 0;
+	}
+
+
+	// Get the tempfs mountpoint
+	safe_asprintf(&cmd, "/usr/lib/opennds/libopennds.sh tmpfs");
+	fd = popen(cmd, "r");
+	if (fd == NULL) {
+		printf("Unable to open library - Terminating");
+		pclose(fd);
+		exit(1);
+	}
+	free(cmd);
+
+	if(fgets(mountpoint, sizeof(mountpoint), fd) == NULL) {
+		printf("Unable to get mountpoint - Terminating");
+		pclose(fd);
+		exit(1);
+	}
+	pclose(fd);
+
+	//Create lock
+	ret = ndsctl_lock(mountpoint, &lockfd);
+
+	if (ret > 0) {
+		return ret;
+	} 
+
+	// Get the configured socket filename if there is one
+	safe_asprintf(&cmd, "/usr/lib/opennds/libopennds.sh get_option_from_config ndsctlsocket");
+	fd = popen(cmd, "r");
+	if (fd == NULL) {
+		printf("Unable to open library - Terminating");
+		exit(1);
+	}
+	free(cmd);
+
+	if(fgets(socket_file, sizeof(socket_file), fd) == NULL) {
+		// Not set in config, so using default socket
+		strcat(socket_file, DEFAULT_SOCKET_FILENAME);
+	}
+	pclose(fd);
+
+	// Construct the full socket path/filename
+	safe_asprintf(&socket, "%s/%s", mountpoint, socket_file);
+
+	// check arguments that need socket access and take action:
 	arg = find_argument(argv[i]);
 
 	if (arg == NULL) {
 		fprintf(stderr, "Unknown command: %s\n", argv[i]);
-		fclose(fd);
-		remove(lockfile);
+		ndsctl_unlock(&lockfd);
+		free(socket);
 		return 1;
 	}
 
-	// Send command, argv[i+1] may be NULL.
-	ret = ndsctl_do(socket, arg, argv[i+1]);
-	fclose(fd);
-	remove(lockfile);
-	return 0;
+	// Collect command line arguments then send the command
+	if (argc > i+1) {
+		snprintf(args, sizeof(args), "%s", argv[i+1]);
+
+		for (counter=i+2; counter < argc; counter++) {
+			snprintf(argi, sizeof(argi), ",%s", argv[counter]);
+			strncat(args, argi, sizeof(args)-1);
+		}
+	}
+
+	ret = ndsctl_do(socket, arg, args);
+	ndsctl_unlock(&lockfd);
+	free(socket);
+	return ret;
 }
+
+

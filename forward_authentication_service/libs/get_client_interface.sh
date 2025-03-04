@@ -1,25 +1,25 @@
 #!/bin/sh
-#Copyright (C) The openNDS Contributors 2004-2020
-#Copyright (C) BlueWave Projects and Services 2015-2020
+#Copyright (C) BlueWave Projects and Services 2015-2024
 #This software is released under the GNU GPL license.
 #
 # Warning - shebang sh is for compatibliity with busybox ash (eg on OpenWrt)
-# This is changed to bash automatically by Makefile for Debian
+# This is changed to bash automatically by Makefile for generic Linux
 #
 
-
-pid=$(ps | grep get_client_interface | awk -F ' ' 'NR==2 {print $1}')
+pid=$(pgrep -f "/bin/sh /usr/lib/opennds/get_client_interface.sh")
 
 # This script requires the iw and ip packages (usually available by default)
 
 if [ -z $(command -v ip) ]; then
-	echo "ip utility not available" | logger -p "daemon.warn" -s -t "NDS-Library[$pid]"
+	/usr/lib/opennds/libopennds.sh write_to_syslog "ip utility not available - critical error" "err"
 	exit 1
 fi
 
 if [ -z $(command -v iw) ]; then
-	echo "iw utility not available" | logger -p "daemon.warn" -s -t "NDS-Library[$pid]"
-	exit 1
+	/usr/lib/opennds/libopennds.sh write_to_syslog "unable to detect wireless interface - iw utility not available" "debug"
+	iwstatus=false
+else
+	iwstatus=true
 fi
 
 # mac address of client is passed as a command line argument
@@ -53,35 +53,41 @@ clientlocalif=$(ip -4 neigh | awk -F ' ' 'match($s,"'"$mac"' ")>0 {printf $3}')
 
 if [ -z "$clientlocalif" ]; then
 	# The client has gone offline eg battery saving or switched to another ssid
-	echo "Client $mac is not online" | logger -p "daemon.info" -s -t "NDS-Library[$pid]"
 	exit 1
 fi
 
-# Get list of wireless interfaces on this device
-# This list will contain all the wireless interfaces configured on the device
-# eg wlan0, wlan0-1, wlan1, wlan1-1 etc
-interface_list=$(iw dev | awk -F 'Interface ' 'NF>1{printf $2" "}')
+clientmeshif=""
 
-# Scan the wireless interfaces on this device for the client mac
-for interface in $interface_list; do
-	macscan=$(iw dev $interface station dump | awk -F " " 'match($s, "'"$mac"'")>0{printf $2}')
+if [ "$iwstatus" = true ]; then 
+	# Get list of wireless interfaces on this device
+	# This list will contain all the wireless interfaces configured on the device
+	# eg wlan0, wlan0-1, wlan1, wlan1-1 etc
+	interface_list=$(iw dev | awk -F 'Interface ' 'NF>1{printf $2" "}')
 
-	if [ ! -z "$macscan" ]; then
-		clientmeshif=""
-		clientlocalif=$interface
-		break
-	else
-		clientlocalip=$(ip -4 neigh | awk -F ' ' 'match($s,"'"$mac"' ")>0 {printf $1}')
-		ping=$(ping -W 1 -c 1 $clientlocalip)
-		meshmac=$(iw dev $interface mpp dump | awk -F "$mac " 'NF>1{printf $2}')
-		if [ ! -z "$meshmac" ]; then
-			clientmeshif=$meshmac
+	# Scan the wireless interfaces on this device for the client mac
+	for interface in $interface_list; do
+		macscan=$(iw dev $interface station dump | awk -F " " 'match($s, "'"$mac"'")>0{printf $2}')
+
+		if [ ! -z "$macscan" ]; then
+			clientlocalif=$interface
+			break
+		else
+			clientlocalip=$(ip -4 neigh | awk -F ' ' 'match($s,"'"$mac"' ")>0 {printf $1}')
+			ping=$(ping -W 1 -c 1 $clientlocalip)
+			meshmac=$(iw dev $interface mpp dump | awk -F "$mac " 'NF>1{printf $2}')
+			if [ ! -z "$meshmac" ]; then
+				clientmeshif=$meshmac
+			fi
 		fi
-	fi
-done
+	done
+fi
 
 # Return the local interface the client is using, the mesh node mac address and the local mesh interface
-echo "$clientlocalif $clientmeshif"
+if [ -z "$clientmeshif" ]; then
+	printf "%s" "$clientlocalif"
+else
+	printf "%s" "$clientlocalif $clientmeshif"
+fi
 
 exit 0
 

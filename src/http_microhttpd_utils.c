@@ -1,20 +1,21 @@
-/*
- * uhttpd - Tiny single-threaded httpd
- *
- *	 Copyright (C) 2010-2013 Jo-Philipp Wich <xm@subsignal.org>
- *	 Copyright (C) 2013 Felix Fietkau <nbd@openwrt.org>
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+/************************************************************************\
+ * This program is free software; you can redistribute it and/or	*
+ * modify it under the terms of the GNU General Public License as	*
+ * published by the Free:Software Foundation; either version 2 of	*
+ * the License, or (at your option) any later version.			*
+ *									*
+ * This program is distributed in the hope that it will be useful,	*
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of	*
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.		*
+ * See the GNU General Public License for more details.		*
+\************************************************************************/
+
+/** @internal
+ * @file http_microhttpd_utils.c
+ * @brief a httpd implementation using libmicrohttpd
+ * @author Copyright (C) 2015 Alexander Couzens <lynxis@fe80.eu>
+ * @author Copyright (C) 2015-2023 The openNDS contributors <opennds@blue-wave.net>
+ * @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
  */
 
 #include <ctype.h>
@@ -45,6 +46,13 @@ int htmlentityencode(char *buf, int blen, const char *src, int slen)
 				buf[len++] = '#';
 				buf[len++] = '3';
 				buf[len++] = '5';
+				buf[len++] = ';';
+
+			} else if (src[i] == '$') {
+				buf[len++] = '&';
+				buf[len++] = '#';
+				buf[len++] = '3';
+				buf[len++] = '6';
 				buf[len++] = ';';
 
 			} else if (src[i] == '&') {
@@ -95,7 +103,7 @@ int htmlentityencode(char *buf, int blen, const char *src, int slen)
 		}
 	}
 
-	debug(LOG_INFO, "HTML Entity encoded string: %s, length: %d", buf, len);
+	debug(LOG_DEBUG, "HTML Entity encoded string: %s, length: %d", buf, len);
 	return (i == slen) ? len : -1;
 }
 
@@ -160,8 +168,49 @@ int uh_urlencode(char *buf, int blen, const char *src, int slen)
 		}
 	}
 
-	debug(LOG_INFO, "URL encoded string: %s, length: %d", buf, len);
+	debug(LOG_DEBUG, "URL encoded string: %s, length: %d", buf, len);
 	return (i == slen) ? len : -1;
+}
+
+
+int b64_encode(char *buf, int blen, const char *src, int slen)
+{
+	int  i;
+	int  v;
+	int len = 0;
+	const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+	debug(LOG_DEBUG, "string to b64 encode: %s length %d", src, slen);
+
+	for (i=0, len=0; i<slen; i+=3, len+=4) {
+		if ((len+4) <= blen) {
+			v = src[i];
+			v = i+1 < slen ? v << 8 | src[i+1] : v << 8;
+			v = i+2 < slen ? v << 8 | src[i+2] : v << 8;
+
+			buf[len]   = b64chars[(v >> 18) & 0x3F];
+			buf[len+1] = b64chars[(v >> 12) & 0x3F];
+
+			if (i+1 < slen) {
+				buf[len+2] = b64chars[(v >> 6) & 0x3F];
+			} else {
+				buf[len+2] = '=';
+			}
+
+			if (i+2 < slen) {
+				buf[len+3] = b64chars[v & 0x3F];
+			} else {
+				buf[len+3] = '=';
+			}
+		} else {
+			debug(LOG_ERR, "Buffer overflow in b64_encode");
+			break;
+		}
+	}
+
+	debug(LOG_DEBUG, "b64 encoded string: %s, encoded length: %d", buf, len);
+
+	return (i == slen) ? (len + 4) : -1;
 }
 
 int uh_b64decode(char *buf, int blen, const void *src, int slen)
@@ -203,6 +252,7 @@ int uh_b64decode(char *buf, int blen, const void *src, int slen)
 		buf[len++] = (char)(cout);
 	}
 
+	debug(LOG_DEBUG, "b64 decoded string: %s, decoded length: %d", buf, len);
 	buf[len++] = 0;
 	return len;
 }

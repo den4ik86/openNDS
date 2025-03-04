@@ -1,9 +1,9 @@
 Customising openNDS
 ########################
 
-After initial installation, openNDS (NDS) should be working in its most basic mode and client Captive Portal Detection (CPD) should pop up the default splash page.
+After initial installation, openNDS (NDS) should be working in its most basic mode and client Captive Portal Detection (CPD) should pop up the default Click to Continue page.
 
-Before attempting to customise NDS you should ensure it is working in this basic mode before you start.
+Before attempting to customise NDS you should ensure it is working in this basic mode.
 
 NDS reads its configuration file when it starts up but the location of this file varies depending on the operating system.
 
@@ -27,20 +27,18 @@ It should be noted when designing a custom splash page that for security reasons
 The Configuration File
 **********************
 
-In OpenWrt, or operating systems supporting UCI (such as LEDE) the configuration is kept in the file:
+For all operating systems from openNDS v10.1.0 onwards, the configuration is kept in the file:
 
   ``/etc/config/opennds``
 
 
-In other operating systems the configuration is kept in the file:
-
-  ``/etc/opennds/opennds.conf``
-
-Both of these files contain a full list of options and can be edited directly. A restart of NDS is required for any changes to take effect.
+This file contains a full list of options and can be edited directly. A restart of NDS is required for any changes to take effect.
 
 In the case of OpenWrt though, once you are confident in your configuration requirements you can use UCI to read and set any of the configuration options using simple commands, making this very convenient if making changes from scripts, such as those you may write to use with Binauth and FAS.
 
-For example, to list the full configuration, at the command line type:
+For other operating systems you must directly edit the configuration file.
+
+On OpenWrt, to list the full configuration, at the command line type:
 
 .. code-block:: sh
 
@@ -71,95 +69,116 @@ Finally you must tell UCI to commit your changes to the configuration file:
 
   uci commit opennds
 
-The Default Click and Go Splash Page
+API Informational files
+***********************
+
+A number of API informational files are created on startup and contain useful system information to be used by customisation scripts.
+
+These files are located on the logfile mountpoint in the ndscids folder.
+Typically the logfile mountpoint is /tmp or /run depending on the Linux distribution.
+
+The "ndsinfo" file
+==================
+
+This file contains the runtime values of gatewayname, gatewayaddress, gatewayfqdn and the openNDS version.
+
+The "authmonargs" File
+======================
+
+This file contains the runtime values of the url of the remote FAS server, the gateway hash of the current instance of openNDS, and the phpcli command name on the openNDS system.
+
+The "heartbeat" file
+====================
+
+This file contains the timestamp of the last openNDS heartbeat. The file is re-written at the start of every new checkinterval cycle.
+
+The Legacy Click and Go Splash Page
 ************************************
 
-Enabled by setting option login_option_enabled = "0" (default)
-The default default splash page can be found at:
+*The legacy Click to Continue html splash page was deprecated and disabled at v8.0.0.*
 
-  ``/etc/opennds/htdocs/splash.html``
-
-When the splash page is served, the following variables in the page are
-replaced by their values:
-
-* *$gatewayname* The value of GatewayName as set in opennds.conf.
-* *$authtarget* A URL which encodes a unique token and the URL of the user's   original web request. If opennds receives a request at this URL, it completes the authentication process for the client and replies to the request with a "302 Found" to the encoded originally requested URL.
-
-  It should be noted however that, depending on vendor, the client's built in CPD may not respond to simple html links.
-
- An href link example that my prove to be problematical:
-
-  ``<a href="$authtarget">Enter</a>``
-
- (You should instead use a GET-method HTML form to send this   information to the opennds server; see below.)
-
-* *$tok*, *$redir*, *$authaction*, and *$denyaction* are available and should be used to write the splash page to use a GET-method HTML form instead of using $authtarget as the value of an href attribute to communicate with the opennds server.
-
- *$authaction* and *$denyaction* are virtual urls used to inform NDS that a client should be authenticated or deauthenticated and are of the form:
-
- `http://gatewayaddress:gatewayport/opennds_auth/`
-
- and
-
- `http://gatewayaddress:gatewayport/opennds_deny/`
-
-
- A simple example of a GET-method form:
-
-.. code::
-   
-   <form method='GET' action='$authaction'>
-     <input type='hidden' name='tok' value='$tok'>
-     <input type='hidden' name='redir' value='$redir'>
-     <input type='submit' value='Click Here to Enter'>
-   </form>
-
-* *$clientip*, *$clientmac* and *$gatewaymac* The respective addresses
-  of the client or gateway. This might be useful in cases where the data
-  needs to be forwarded to some other place by the splash page itself.
-
-* *$nclients* and *$maxclients* User stats. Useful when you need to
-  display something like "n of m users online" on the splash site.
-
-* *$uptime* The time opennds has been running.
-
- A list of all available variables are included in the splash.html file.
-
- If the user accesses the virtual url *$authaction* when already authenticated, a status page is shown:
-
- ``/etc/opennds/htdocs/status.html``
-
- In the status.html file, the same variables as in the splash.html site can be used.
-
-It should be noted when designing a custom splash page that for security reasons many client device CPD implementations:
-
- * Immediately close the browser when the client has authenticated.
-
- * Prohibit the use of href links.
-
- * Prohibit downloading of external files (including .css and .js, even if they are allowed in NDS firewall settings).
-
- * Prohibit the execution of javascript.
-
-Also, note that any images you reference should reside in the subdirectory /etc/opennds/htdocs/images/.
+**From v 9.0.0 it has been removed entirely.**
 
 Dynamic Splash Pages
 ********************
 
-Pre-Installed User Login Dynamic Splash Page
-============================================
+Default Dynamic Click to Continue
+=================================
 
-The pre-installed dynamic splash page is enabled by setting option login_option_enabled = "1".
+The pre-installed dynamic click to continue page sequence is enabled by default using the ThemeSpec "theme_click-to-continue".
+The configuration default is equivalent to setting:
+
+``option login_option_enabled '1'``
+
+It generates a Click to Continue page followed by Thankyou and Landing pages.
+
+User clicks on "Continue" are recorded in the log file /[tmpfs_dir]/ndslog/ndslog.log
+
+Where [tmpfs_dir] is the operating system "temporary" tmpfs mount point.
+This will be  /tmp /run or /var and is automatically detected.
+
+Details of how the script works are contained in comments in the script theme_click-to-continue-basic.sh
+
+
+Pre-Installed dynamic User/email Login page sequence
+====================================================
+
+The pre-installed dynamic login page is enabled by setting option:
+
+``option login_option_enabled '2'``
 
 It generates a login page asking for username and email address.
-User logins are recorded in the log file /tmp/ndslog.log
-Details of how the script works are contained in comments in the script itself.
+User logins are recorded in the log file /[tmpfs_dir]/ndslog/ndslog.log
+
+Where [tmpfs_dir] is the operating system "temporary" tmpfs mount point.
+This will be  /tmp /run or /var and is automatically detected.
+
+Details of how the script works are contained in comments in the script theme_user-email-login-basic.sh
 
 
-Custom Dynamic Splash Pages
-===========================
+Custom Dynamic ThemeSpec Pages
+==============================
+Custom ThemeSpec page sequences can be added by setting option:
 
-Custom designed dynamically generated splash pages are supported using FAS and PreAuth (such as the included alternative username/email login script).
+``option login_option_enabled '3'``
 
-For details see the FAS and PreAuth chapters.
+and option
+
+``option themespecpath '/path/to/themespec_script'``
+
+Two additional ThemeSpec files are included as examples:
+
+/usr/lib/opennds/theme_click-to-continue-custom-placeholders.sh
+
+and
+
+/usr/lib/opennds/theme_user-email-login-custom-placeholders.sh
+
+Both these also require custom parameter, variable, image and file lists:
+
+``list fas_custom_parameters_list 'logo_message=openNDS:%20Perfect%20on%20OpenWrt!'``
+
+``list fas_custom_parameters_list 'banner1_message=BlueWave%20-%20Wireless%20Network%20Specialists'``
+
+``list fas_custom_parameters_list 'banner2_message=HMS%20Pickle'``
+
+``list fas_custom_parameters_list 'banner3_message=SeaWolf%20Cruiser%20Racer'``
+
+``list fas_custom_variables_list 'input=phone:Phone%20Number:text;postcode:Home%20Post%20Code:text'``
+
+``list fas_custom_images_list 'logo_png=https://openwrt.org/_media/logo.png'``
+
+``list fas_custom_images_list 'banner1_jpg=https://raw.githubusercontent.com/openNDS/openNDS/9.0.0/resources/bannerbw.jpg'``
+
+``list fas_custom_images_list 'banner2_jpg=https://raw.githubusercontent.com/openNDS/openNDS/9.0.0/resources/bannerpickle.jpg'``
+
+``list fas_custom_images_list 'banner3_jpg=https://raw.githubusercontent.com/openNDS/openNDS/9.0.0/resources/bannerseawolf.jpg'``
+
+``list fas_custom_files_list 'advert1_htm=https://raw.githubusercontent.com/openNDS/openNDS/9.0.0/resources/bannerpickle.htm'``
+
+Once configured these two example ThemeSpec scripts will download custom image files, a custom html file and inject custom user input forms for phone number and home postcode.
+
+Other Custom Designs
+====================
+Custom designed dynamically generated ThemeSpec pages are supported using FAS and PreAuth. For details see the FAS and PreAuth chapters.
 

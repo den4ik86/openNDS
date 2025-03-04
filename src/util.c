@@ -24,6 +24,9 @@
   @author Copyright (C) 2004 Philippe April <papril777@yahoo.com>
   @author Copyright (C) 2006 Benoit Grégoire <bock@step.polymtl.ca>
   @author Copyright (C) 2008 Paul Kube <nodogsplash@kokoro.ucsd.edu>
+  @author Copyright (C) 2021 ndsctl_lock() and ndsctl_unlock() based on code by Linus Lüssing <ll@simonwunderlich.de>
+  @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
+
  */
 
 #define _GNU_SOURCE
@@ -57,6 +60,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <netdb.h>
+#include <microhttpd.h>
 
 #include "common.h"
 #include "client_list.h"
@@ -65,7 +69,7 @@
 #include "conf.h"
 #include "debug.h"
 #include "fw_iptables.h"
-
+#include "http_microhttpd_utils.h"
 
 // Defined in main.c
 extern time_t started_time;
@@ -81,19 +85,475 @@ extern unsigned int authenticated_since_start;
 extern int created_httpd_threads;
 extern int current_httpd_threads;
 
+int count_substrings(char* string, char* substring) {
+	int idx;
+	int len1;
+	int len2;
+	int numsubs = 0;
+
+	len1 = strlen(string);
+	len2 = strlen(substring);
+
+	for(idx = 0; idx < len1 - len2 + 1; idx++) {
+		if(strstr(string + idx, substring) == string + idx) {
+			numsubs++;
+			idx = idx + len2 -1;
+		}
+	}
+
+	return numsubs;
+}
+
+int startdaemon(char *cmd, int daemonpid)
+{
+	/* Start a program in the background.
+		cmd contains the full path and startup arguments of the program
+		daemonpid returns with the pid of the running program
+		daemonpid returns 0 if the program terminates quickly
+		Function returns 0 if successfully running in background, 1 if failed
+	*/
+
+	char *buff;
+	char *msg;
+	char *daemoncmd;
+	int ret;
+
+	buff = safe_calloc(MID_BUF);
+	msg = safe_calloc(STATUS_BUF);
+
+	b64_encode(buff, MID_BUF, cmd, strlen(cmd));
+
+	daemoncmd = safe_calloc(MID_BUF);
+	safe_snprintf(daemoncmd, MID_BUF, "/usr/lib/opennds/libopennds.sh startdaemon '%s'", buff);
+
+	debug(LOG_DEBUG, "startdaemon command: %s", daemoncmd);
+
+	ret = execute_ret_url_encoded(msg, STATUS_BUF - 1, daemoncmd);
+
+	if (ret == 0) {
+
+		if (strcmp(msg, "0") != 0) {
+			debug(LOG_DEBUG, "Daemon pid: %s", msg);
+		}
+	} else {
+		debug(LOG_INFO, "Failed start daemon from [%s] - retrying", cmd);
+		sleep(1);
+
+		ret = execute_ret_url_encoded(msg, STATUS_BUF - 1, daemoncmd);
+
+		if (ret == 0) {
+
+			if (strcmp(msg, "0") != 0) {
+				debug(LOG_DEBUG, "Daemon pid: %s", msg);
+			}
+		} else {
+			debug(LOG_INFO, "Failed start daemon from [%s] - giving up", cmd);
+		}
+	}
+	free(daemoncmd);
+	free(buff);
+	free(msg);
+	return ret;
+}
+
+int stopdaemon(int daemonpid)
+{
+	/* Stop a program that is running in the background, daemonpid contains the pid of the daemon
+		Returns 0 if successful or 1 if failed to stop.
+		Note: It might fail to stop because it was actually already stopped.
+	*/
+	char *msg;
+	char *daemoncmd;
+	int ret;
+
+	msg = safe_calloc(STATUS_BUF);
+	daemoncmd = safe_calloc(MID_BUF);
+	safe_snprintf(daemoncmd, MID_BUF, "/usr/lib/opennds/libopennds.sh stopdaemon '%d'", daemonpid);
+
+	debug(LOG_DEBUG, "stopdaemon command: %s", daemoncmd);
+
+	ret = execute_ret_url_encoded(msg, STATUS_BUF - 1, daemoncmd);
+
+	if (ret == 0) {
+		debug(LOG_DEBUG, "stopdaemon, pid: [%d], %s", daemonpid, msg);
+	} else {
+		debug(LOG_INFO, "Failed stopdaemon pid [%d] - retrying", daemonpid);
+		sleep(1);
+
+		ret = execute_ret_url_encoded(msg, STATUS_BUF - 1, daemoncmd);
+
+		if (ret == 0) {
+			debug(LOG_DEBUG, "stopdaemon, pid: [%d], %s", daemonpid, msg);
+		} else {
+			debug(LOG_INFO, "Failed stop daemon, pid [%d] - giving up", daemonpid);
+		}
+	}
+	free(daemoncmd);
+	free(msg);
+	return ret;
+}
+
+void write_ndsinfo(void)
+{
+	char *cmd;
+	char *msg;
+	char write_yes[] = "done";
+
+	s_config *config = config_get_config();
+
+	msg = safe_calloc(SMALL_BUF);
+	safe_asprintf(&cmd,
+		"/usr/lib/opennds/libopennds.sh write ndsinfo '%s' 'tmpfsmountpoint=\"%s\"'",
+		config->tmpfsmountpoint,
+		config->tmpfsmountpoint
+	);
+	execute_ret_url_encoded(msg, SMALL_BUF - 1, cmd);
+
+	if (strcmp(msg, write_yes) != 0) {
+		debug(LOG_ERR, "Unable to write ndsinfo, exiting ...");
+		exit(1);
+	}
+
+	free(msg);
+	free(cmd);
+
+	msg = safe_calloc(SMALL_BUF);
+	safe_asprintf(&cmd,
+		"/usr/lib/opennds/libopennds.sh write ndsinfo '%s' 'gatewaynamehtml=\"%s\"'",
+		config->tmpfsmountpoint,
+		config->http_encoded_gw_name
+	);
+	execute_ret_url_encoded(msg, SMALL_BUF - 1, cmd);
+
+	if (strcmp(msg, write_yes) != 0) {
+		debug(LOG_ERR, "Unable to write ndsinfo, exiting ...");
+		exit(1);
+	}
+
+	free(msg);
+	free(cmd);
+
+	msg = safe_calloc(SMALL_BUF);
+	safe_asprintf(&cmd,
+		"/usr/lib/opennds/libopennds.sh write ndsinfo '%s' 'gatewayaddress=\"%s\"'",
+		config->tmpfsmountpoint,
+		config->gw_ip
+	);
+	execute_ret_url_encoded(msg, SMALL_BUF - 1, cmd);
+
+	if (strcmp(msg, write_yes) != 0) {
+		debug(LOG_ERR, "Unable to write ndsinfo, exiting ...");
+		exit(1);
+	}
+
+	free(msg);
+	free(cmd);
+
+	msg = safe_calloc(SMALL_BUF);
+	safe_asprintf(&cmd,
+		"/usr/lib/opennds/libopennds.sh write ndsinfo '%s' 'gatewayfqdn=\"%s\"'",
+		config->tmpfsmountpoint,
+		config->gw_fqdn
+	);
+	execute_ret_url_encoded(msg, SMALL_BUF - 1, cmd);
+
+	if (strcmp(msg, write_yes) != 0) {
+		debug(LOG_ERR, "Unable to write ndsinfo, exiting ...");
+		exit(1);
+	}
+
+	free(msg);
+	free(cmd);
+
+	msg = safe_calloc(SMALL_BUF);
+	safe_asprintf(&cmd,
+		"/usr/lib/opennds/libopennds.sh write ndsinfo '%s' 'version=%s'",
+		config->tmpfsmountpoint,
+		VERSION
+	);
+	execute_ret_url_encoded(msg, SMALL_BUF - 1, cmd);
+
+	if (strcmp(msg, write_yes) != 0) {
+		debug(LOG_ERR, "Unable to write ndsinfo, exiting ...");
+		exit(1);
+	}
+
+	free(msg);
+	free(cmd);
+}
+
+int check_routing(int watchdog)
+{
+	// Check routing configuration
+	char *rtest;
+	char *rcmd;
+	char rtr_fail[] = "-";
+	char rtr_offline[] = "offline";
+	char rtr_online[] = "online";
+	int online_count;
+	int offline_count;
+	s_config *config = config_get_config();
+
+	safe_asprintf(&rcmd,
+		"/usr/lib/opennds/libopennds.sh gatewayroute \"%s\"",
+		config->gw_interface
+	);
+
+	rtest = safe_calloc(SMALL_BUF);
+
+	if (execute_ret_url_encoded(rtest, SMALL_BUF - 1, rcmd) == 0) {
+		online_count = count_substrings(rtest, rtr_online);
+		offline_count = count_substrings(rtest, rtr_offline);
+
+
+		if (strcmp(rtest, rtr_fail) == 0) {
+			debug(LOG_ERR, "Routing configuration is not valid for openNDS, exiting ...");
+			exit(1);
+		} else {
+
+			if (watchdog == 0) {
+				debug(LOG_NOTICE, "Number of Upstream gateway(s) [ %d ]", (online_count + offline_count));
+			}
+
+			if (offline_count > 0) {
+				// An upstream gateway is offline
+				if (online_count == config->online_status) {
+					// no change since last time so issue warning
+					debug(LOG_WARNING, "Upstream gateway(s) [ %s ]", rtest);
+
+				} else if (online_count > config->online_status) {
+					// an interface came online
+					debug(LOG_NOTICE, "Upstream gateway(s) [ %s ]", rtest);
+					config->online_status = online_count;
+
+				} else if (online_count < config->online_status) {
+					// an interface went offline
+					debug(LOG_WARNING, "Upstream gateway(s) [ %s ]", rtest);
+					config->online_status = online_count;
+				}
+			} else {
+
+				if (online_count > config->online_status) {
+					// an interface came online
+					debug(LOG_NOTICE, "Upstream gateway(s) [ %s ]", rtest);
+				}
+
+				config->online_status = online_count;
+			}
+		}
+
+		if (config->ext_gateway) {
+			free (config->ext_gateway);
+		}
+
+		config->ext_gateway = safe_strdup(rtest);
+		free (rcmd);
+		free (rtest);
+		debug(LOG_DEBUG, "Online Status [ %d ]", config->online_status);
+		return config->online_status;
+	} else {
+		debug(LOG_ERR, "Unable to get routing configuration, retrying later ...");
+		config->online_status = 0;
+		free (rcmd);
+		free (rtest);
+
+		return config->online_status;
+	}
+}
+
+
+int ndsctl_lock()
+{
+	char *lockfile;
+	s_config *config = config_get_config();
+
+	// Open or create the lock file
+	safe_asprintf(&lockfile, "%s/ndsctl.lock", config->tmpfsmountpoint);
+	config->lockfd = open(lockfile, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+	free(lockfile);
+
+	if (config->lockfd < 0) {
+		debug(LOG_ERR, "CRITICAL ERROR - Unable to open [%s]", lockfile);
+		return 5;
+	}
+
+	if (lockf(config->lockfd, F_TLOCK, 0) == 0) {
+		return 0;
+	} else {
+
+		if (errno != EACCES && errno != EAGAIN) {
+			// persistent error
+			debug(LOG_ERR, "CRITICAL ERROR - Unable to create lock on [%s]", lockfile);
+			close(config->lockfd);
+			return 6;
+		}
+
+		debug(LOG_ERR, "ndsctl is locked by another process");
+		close(config->lockfd);
+		return 4;
+	}
+}
+
+void ndsctl_unlock()
+{
+	s_config *config = config_get_config();
+
+	if (lockf(config->lockfd, F_ULOCK, 0) < 0) {
+		debug(LOG_ERR, "Unable to Unlock ndsctl");
+	}
+
+	close(config->lockfd);
+}
+
+
+int download_remotes(int refresh)
+{
+	char *cmd = NULL;
+	int daemonpid = 0;
+	s_config *config = config_get_config();
+
+	// If themespec is not set then we do not need to download remotes
+	// client_params.sh does its own downloads for the 511 status pages
+
+	if (strcmp(config->themespec_path, "") == 0) {
+		return 0;
+	}
+
+	if(refresh == 0) {
+		debug(LOG_DEBUG, "Background Checking of remotes for: %s\n", config->themespec_path);
+	} else {
+		debug(LOG_DEBUG, "Background Refreshing of remotes for: %s\n", config->themespec_path);
+	}
+
+	safe_asprintf(&cmd,
+		"/usr/lib/opennds/libopennds.sh download \"%s\" \"%s\" \"%s\" \"%d\" \"%s\"",
+		config->themespec_path,
+		config->custom_images,
+		config->custom_files,
+		refresh,
+		config->webroot
+	);
+
+	if (config->online_status > 0) {
+		debug(LOG_DEBUG, "Starting daemon: %s\n", cmd);
+
+		if (startdaemon(cmd, daemonpid) == 0) {
+
+			if (daemonpid != 0) {
+				debug(LOG_DEBUG, "daemon(%s) pid is [%d]", cmd, daemonpid);
+			}
+		} else {
+			debug(LOG_DEBUG, "Cannot download remotes - daemon failed to start");
+		}
+	} else {
+		debug(LOG_DEBUG, "Cannot download remotes - upstream gateway(s) are offline");
+	}
+
+	free(cmd);
+	return 0;
+}
+
+int write_client_info(char* msg, int msg_len, const char *mode, const char *cid, const char *info)
+{
+	char *cmd = NULL;
+	s_config *config = config_get_config();
+	cmd = safe_calloc(MID_BUF);
+	debug(LOG_DEBUG, "Client Info: %s", info);
+	safe_snprintf(cmd, MID_BUF, "/usr/lib/opennds/libopennds.sh '%s' '%s' '%s' '%s'", mode, cid, config->tmpfsmountpoint, info);
+	debug(LOG_DEBUG, "WriteClientInfo command: %s", cmd);
+
+	if (execute_ret_url_encoded(msg, msg_len - 1, cmd) == 0) {
+		debug(LOG_DEBUG, "Client Info updated: %s", info);
+	} else {
+		debug(LOG_INFO, "Failed to write client info [%s] - retrying", info);
+		sleep(1);
+
+		if (execute_ret_url_encoded(msg, msg_len - 1, cmd) == 0) {
+			debug(LOG_DEBUG, "Client Info updated: %s", info);
+		} else {
+			debug(LOG_INFO, "Failed to write client info [%s] - giving up", info);
+		}
+	}
+	free (cmd);
+	return 0;
+}
+
+int check_heartbeat()
+{
+	char *cmd;
+	char *msg;
+	int ret;
+
+	cmd = safe_calloc(SMALL_BUF);
+	msg = safe_calloc(STATUS_BUF);
+
+	safe_snprintf(cmd, SMALL_BUF, "/usr/lib/opennds/libopennds.sh check_heartbeat");
+
+	ret = execute_ret_url_encoded(msg, STATUS_BUF - 1, cmd);
+
+	free (cmd);
+	free (msg);
+	return ret;
+}
+
+int get_option_from_config(char* msg, int msg_len, const char *option)
+{
+	char *cmd;
+
+	cmd = safe_calloc(SMALL_BUF);
+	safe_snprintf(cmd, SMALL_BUF, "/usr/lib/opennds/libopennds.sh get_option_from_config '%s'", option);
+
+	if (execute_ret_url_encoded(msg, msg_len - 1, cmd) != 0) {
+		debug(LOG_INFO, "Failed to get option [%s] - retrying", option);
+		sleep(1);
+
+		if (execute_ret_url_encoded(msg, msg_len - 1, cmd) != 0) {
+			debug(LOG_INFO, "Failed to get option [%s] - giving up", option);
+		}
+	}
+
+	free (cmd);
+	return 0;
+}
+
+
+int get_list_from_config(char* msg, int msg_len, const char *list)
+{
+	char *cmd;
+
+	cmd = safe_calloc(MID_BUF);
+	safe_snprintf(cmd, MID_BUF, "/usr/lib/opennds/libopennds.sh get_list_from_config '%s'", list);
+
+	if (execute_ret_url_encoded(msg, msg_len - 1, cmd) != 0) {
+		debug(LOG_INFO, "Failed to get list [%s] - retrying", list);
+		sleep(1);
+
+		if (execute_ret_url_encoded(msg, msg_len - 1, cmd) != 0) {
+			debug(LOG_INFO, "Failed to get list [%s] - giving up", list);
+		}
+	}
+	free (cmd);
+	return 0;
+}
+
 int get_client_interface(char* clientif, int clientif_len, const char *climac)
 {
-	char *clifcmd = NULL;
-
-	safe_asprintf(&clifcmd, "/usr/lib/opennds/get_client_interface.sh %s", climac);
+	char *clifcmd;
+	clifcmd = safe_calloc(SMALL_BUF);
+	safe_snprintf(clifcmd, SMALL_BUF, "/usr/lib/opennds/get_client_interface.sh %s", climac);
 
 	if (execute_ret_url_encoded(clientif, clientif_len - 1, clifcmd) == 0) {
 		debug(LOG_DEBUG, "Client Mac Address: %s", climac);
 		debug(LOG_DEBUG, "Client Connection(s) [localif] [remotemeshnodemac] [localmeshif]: %s", clientif);
 	} else {
-		debug(LOG_ERR, "Failed to get client connections - client probably offline");
-		free (clifcmd);
-		return -1;
+		debug(LOG_INFO, "Failed to get client connections for [%s] - retrying", climac);
+		sleep(1);
+
+		if (execute_ret_url_encoded(clientif, clientif_len - 1, clifcmd) == 0) {
+			debug(LOG_DEBUG, "Client Connection(s) [localif] [remotemeshnodemac] [localmeshif]: %s", clientif);
+		} else {
+			debug(LOG_INFO, "Failed to get client connections for [%s] - giving up", climac);
+		}
 	}
 	free (clifcmd);
 	return 0;
@@ -103,10 +563,10 @@ int get_client_interface(char* clientif, int clientif_len, const char *climac)
 int hash_str(char* hash, int hash_len, const char *src)
 {
 	char *hashcmd = NULL;
-
 	s_config *config = config_get_config();
 
-	safe_asprintf(&hashcmd, "printf '%s' | %s | awk -F' ' '{printf $1}'", src, config->fas_hid);
+	hashcmd = safe_calloc(SMALL_BUF);
+	safe_snprintf(hashcmd, SMALL_BUF, "printf '%s' | %s | awk -F' ' '{printf $1}'", src, config->fas_hid);
 
 	if (execute_ret_url_encoded(hash, hash_len - 1, hashcmd) == 0) {
 		debug(LOG_DEBUG, "Source string: %s", src);
@@ -126,11 +586,11 @@ static int _execute_ret(char* msg, int msg_len, const char *cmd)
 	struct sigaction sa, oldsa;
 	FILE *fp;
 	int rc;
+	size_t byte_count;
 
 	debug(LOG_DEBUG, "Executing command: %s", cmd);
 
 	// Temporarily get rid of SIGCHLD handler (see main.c), until child exits.
-	debug(LOG_DEBUG,"Setting default SIGCHLD handler SIG_DFL");
 	sa.sa_handler = SIG_DFL;
 	sigemptyset(&sa.sa_mask);
 	sa.sa_flags = SA_NOCLDSTOP | SA_RESTART;
@@ -140,22 +600,37 @@ static int _execute_ret(char* msg, int msg_len, const char *cmd)
 
 	fp = popen(cmd, "r");
 	if (fp == NULL) {
-		debug(LOG_ERR, "popen(): %s", strerror(errno));
-		rc = -1;
-		goto abort;
+		debug(LOG_INFO, "popen(): [%s] Retrying..", strerror(errno));
+		sleep(1);
+		fp = popen(cmd, "r");
+
+		if (fp == NULL) {
+			debug(LOG_INFO, "popen(): [%s] Giving up..", strerror(errno));
+			rc = -1;
+			goto abort;
+		}
 	}
 
 	if (msg && msg_len > 0) {
-		rc = fread(msg, msg_len - 1, 1, fp);
+		debug(LOG_DEBUG, "Reading command output");
+		byte_count = fread(msg, 1, msg_len - 1, fp);
+
+		if (byte_count == msg_len - 1) {
+			debug(LOG_ERR, "Buffer overflow, output may be truncated.");
+		}
+
+		debug(LOG_DEBUG, "command output: [%s]", msg);
 	}
 
 	rc = pclose(fp);
 
 	if (WIFSIGNALED(rc) != 0) {
-		debug(LOG_WARNING, "Command process exited due to signal %d", WTERMSIG(rc));
+		debug(LOG_DEBUG, "Command process exited due to signal [%d]", WTERMSIG(rc));
+		debug(LOG_DEBUG, "Requested command: [%s]", cmd);
+		rc = WTERMSIG(rc);
+	} else {
+		rc = WEXITSTATUS(rc);
 	}
-
-	rc = WEXITSTATUS(rc);
 
 abort:
 
@@ -216,96 +691,68 @@ int execute_ret_url_encoded(char* msg, int msg_len, const char *cmd)
 char *
 get_iface_ip(const char ifname[], int ip6)
 {
-	char addrbuf[INET6_ADDRSTRLEN] = {0};
-	char cmd[128] = {0};
-	char iptype[8] = {0};
-	int i;
+	char addrbuf[STATUS_BUF] = {0};
+	char *cmd;
+	char *iptype;
+
+	iptype = safe_calloc(STATUS_BUF);
 
 	if (ip6) {
-		snprintf(iptype, sizeof(iptype), "inet6");
+		snprintf(iptype, STATUS_BUF, "inet6");
 	} else {
-		snprintf(iptype, sizeof(iptype), "inet");
+		snprintf(iptype, STATUS_BUF, "inet");
  	}
 
-	snprintf(cmd, sizeof(cmd), "ip address | grep -A4 %s: | grep '%s ' | awk '{print $2}' | awk -F'/' '{printf $1}'",
+	cmd = safe_calloc(STATUS_BUF);
+
+	snprintf(cmd, STATUS_BUF, "/usr/lib/opennds/libopennds.sh gatewayip \"%s\" \"%s\"",
 		ifname,
 		iptype
 	);
 
+	free(iptype);
+
 	debug(LOG_NOTICE, "Attempting to Bind to interface: %s", ifname);
 
-	for (i=0; i<10; i=i+1) {
-		execute_ret(addrbuf, sizeof(addrbuf), cmd);
-		if (is_addr(addrbuf) == 1) {
-			break;
-		} else {
-			debug(LOG_NOTICE, "Interface: %s is not yet ready - waiting...", ifname);
-			sleep(1);
-		}
-	}
+	memset(addrbuf, 0, STATUS_BUF);
 
-	return safe_strdup(addrbuf);
+	if (execute_ret(addrbuf, STATUS_BUF, cmd) == 0) {
+		free(cmd);
+		return safe_strdup(addrbuf);
+	} else {
+		free(cmd);
+		return "error";
+	}
 }
 
 char *
 get_iface_mac(const char ifname[])
 {
-	char addrbuf[18] = {0};
-	char cmd[128] = {0};
+	char addrbuf[STATUS_BUF] = {0};
+	char *cmd;
+	s_config *config;
 
-	snprintf(cmd, sizeof(cmd), "ip address | grep -A1 '%s:' | grep 'link/ether ' | awk '{print $2}' | awk -F'/' '{printf $1}'",
-		ifname
-	);
+	config = config_get_config();
 
-	execute_ret(addrbuf, sizeof(addrbuf), cmd);
-	return safe_strdup(addrbuf);
-}
+	debug(LOG_DEBUG, "Attempting to get mac of interface: %s", ifname);
 
-/** Get name of external interface (the one with default route to the net).
- *  Caller must free.
- */
-char *
-get_ext_iface(void)
-{
-#ifdef __linux__
-	FILE *input;
-	char device[16] = {0};
-	char gw[16] = {0};
-	int i = 1;
-	pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-	pthread_mutex_t cond_mutex = PTHREAD_MUTEX_INITIALIZER;
-	struct timespec timeout;
-
-	debug(LOG_DEBUG, "get_ext_iface(): Autodectecting the external interface from routing table");
-	for (i = 1; i <= NUM_EXT_INTERFACE_DETECT_RETRY; i += 1) {
-		input = fopen("/proc/net/route", "r");
-		while (!feof(input)) {
-			int rc = fscanf(input, "%s %s %*s %*s %*s %*s %*s %*s %*s %*s %*s\n", device, gw);
-			if (rc == 2 && strcmp(gw, "00000000") == 0) {
-				fclose(input);
-				debug(LOG_INFO, "get_ext_iface(): Detected %s as the default interface after try %d", device, i);
-				return strdup(device);
-			}
-		}
-		fclose(input);
-		debug(LOG_ERR, "get_ext_iface(): Failed to detect the external interface after try %d (maybe the interface is not up yet?).  Retry limit: %d", i, NUM_EXT_INTERFACE_DETECT_RETRY);
-
-		// Sleep for EXT_INTERFACE_DETECT_RETRY_INTERVAL seconds
-		timeout.tv_sec = time(NULL) + EXT_INTERFACE_DETECT_RETRY_INTERVAL;
-		timeout.tv_nsec = 0;
-
-		// Mutex must be locked for pthread_cond_timedwait...
-		pthread_mutex_lock(&cond_mutex);
-		// Thread safe "sleep"
-		pthread_cond_timedwait(&cond, &cond_mutex, &timeout);
-		// No longer needs to be locked
-		pthread_mutex_unlock(&cond_mutex);
+	if (config->gw_mac == NULL) {
+		config->gw_mac = safe_strdup("00:00:00:00:00:00");
 	}
 
-	debug(LOG_ERR, "get_ext_iface(): Failed to detect the external interface after %d tries, aborting", i);
-	exit(1);
-#endif
-	return NULL;
+	cmd = safe_calloc(STATUS_BUF);
+
+	snprintf(cmd, STATUS_BUF, "/usr/lib/opennds/libopennds.sh \"gatewaymac\" \"%s\" \"%s\"",
+		ifname,
+		config->gw_mac
+	);
+
+
+	memset(addrbuf, 0, STATUS_BUF);
+
+	execute_ret(addrbuf, STATUS_BUF, cmd);
+	free(cmd);
+	return safe_strdup(addrbuf);
 }
 
 char *
@@ -358,7 +805,7 @@ char * get_uptime_string(char buf[64]) {
 	sysuptime = get_system_uptime ();
 	now = time(NULL);
 
-	debug(LOG_INFO, "Uncorrected NDS Uptime: %li seconds ", (now - started_time));
+	debug(LOG_DEBUG, "Uncorrected NDS Uptime: %li seconds ", (now - started_time));
 
 	if ((now - started_time) > sysuptime) {
 		uptimesecs = sysuptime;
@@ -377,11 +824,15 @@ time_t get_system_uptime() {
 	pfp = fopen ("/proc/uptime", "r");
 
 	if (pfp != NULL) {
-		(void) fgets (buf, sizeof(buf), pfp);
-		sysuptime = atol(strtok(buf, "."));
-		debug(LOG_INFO, "Operating System Uptime: %li seconds ", sysuptime);
+
+		if(fgets (buf, sizeof(buf), pfp) != NULL) {
+			sysuptime = atol(strtok(buf, "."));
+			debug(LOG_DEBUG, "Operating System Uptime: %li seconds ", sysuptime);
+			fclose (pfp);
+			return sysuptime;
+		}
+
 		fclose (pfp);
-		return sysuptime;
 	}
 
 	debug(LOG_WARNING, "Unable to determine System Uptime.");
@@ -400,30 +851,40 @@ int is_addr(const char* addr) {
 void
 ndsctl_status(FILE *fp)
 {
-	char timebuf[32];
+	char timebuf[64];
 	char durationbuf[64];
 	s_config *config;
 	t_client *client;
 	int indx;
+	unsigned int uploadburst = 0;
+	unsigned int downloadburst = 0;
 	unsigned long int now, uptimesecs, durationsecs = 0;
 	unsigned long long int download_bytes, upload_bytes;
 	t_MAC *trust_mac;
-	t_MAC *allow_mac;
-	t_MAC *block_mac;
 	time_t sysuptime;
+	const char *mhdversion = MHD_get_version();
+	char *msg;
 
 	config = config_get_config();
+
+	if (config->upload_bucket_ratio > 0) {
+		uploadburst = config->checkinterval * config->rate_check_window;
+	}
+
+	if (config->upload_bucket_ratio > 0) {
+		downloadburst = config->checkinterval * config->rate_check_window;
+	}
 
 	fprintf(fp, "==================\nopenNDS Status\n====\n");
 	sysuptime = get_system_uptime ();
 	now = time(NULL);
 
-	debug(LOG_INFO, "Uncorrected Uptime: %li seconds ", (now - started_time));
+	debug(LOG_DEBUG, "Uncorrected Uptime: %li seconds ", (now - started_time));
 
 	if ((now - started_time) > sysuptime) {
 		uptimesecs = sysuptime;
 	} else {
-		uptimesecs = now - started_time;
+		uptimesecs = (now - started_time) + 1;
 	}
 
 	fprintf(fp, "Version: " VERSION "\n");
@@ -431,10 +892,35 @@ ndsctl_status(FILE *fp)
 	format_duration(0, uptimesecs, durationbuf);
 
 	fprintf(fp, "Uptime: %s\n", durationbuf);
-	fprintf(fp, "Gateway Name: %s\n", config->gw_name);
-	fprintf(fp, "Managed interface: %s\n", config->gw_interface);
-	fprintf(fp, "Managed IP range: %s\n", config->gw_iprange);
-	fprintf(fp, "Server listening: http://%s\n", config->gw_address);
+	fprintf(fp, "Gateway Name: [ %s ]\n", config->gw_name);
+	fprintf(fp, "Debug Level: [ %d ]\n", config->debuglevel);
+	fprintf(fp, "Gateway FQDN: [ %s ]\n", config->gw_fqdn);
+
+	if (strstr(config->gw_iprange, "0.0.0.0/0")) {
+		fprintf(fp, "Managed interface: %s\n", config->gw_interface);
+	} else {
+		fprintf(fp, "Managed interface: %s - IP address range: %s\n", config->gw_interface, config->gw_iprange);
+	}
+
+	// Check if router is online
+	int watchdog = 0;
+	int routercheck;
+	routercheck = check_routing(watchdog);
+
+	if (routercheck > 0) {
+		fprintf(fp, "Upstream gateway(s) [ %s ]\n", config->ext_gateway);
+	} else {
+		fprintf(fp, "All Upstream gateway(s) are offline or not connected [ %s ]\n", config->ext_gateway);
+	}
+
+	fprintf(fp, "MHD Server [ version %s ] listening on: http://%s\n", mhdversion, config->gw_address);
+	fprintf(fp, "Maximum Html Page size is [ %llu ] Bytes\n", HTMLMAXSIZE);
+
+	if (config->allow_preemptive_authentication > 0) {
+		fprintf(fp, "Preemptive Authentication is Enabled\n");
+	} else {
+		fprintf(fp, "Preemptive Authentication is Disabled\n");
+	}
 
 	if (config->binauth) {
 		fprintf(fp, "Binauth Script: %s\n", config->binauth);
@@ -443,9 +929,9 @@ ndsctl_status(FILE *fp)
 	}
 
 	if (config->preauth) {
-		fprintf(fp, "Preauth Script: %s\n", config->preauth);
+		fprintf(fp, "ThemeSpec Core Library: %s\n", config->preauth);
 	} else {
-		fprintf(fp, "Preauth: Disabled\n");
+		fprintf(fp, "ThemeSpec: Disabled\n");
 	}
 
 	if (config->fas_port) {
@@ -457,35 +943,43 @@ ndsctl_status(FILE *fp)
 	}
 
 	fprintf(fp, "Client Check Interval: %ds\n", config->checkinterval);
-	fprintf(fp, "Preauth Idle Timeout: %dm\n", config->preauth_idle_timeout);
-	fprintf(fp, "Auth Idle Timeout: %dm\n", config->auth_idle_timeout);
+	fprintf(fp, "Rate Check Window: %d check intervals (%ds)\n", config->rate_check_window, (config->rate_check_window * config->checkinterval));
+	fprintf(fp, "Preauthenticated Client Idle Timeout: %dm\n", config->preauth_idle_timeout);
+	fprintf(fp, "Authenticated Client Idle Timeout: %dm\n", config->auth_idle_timeout);
 
-	if (config->redirectURL) {
-		fprintf(fp, "Redirect URL: %s\n", config->redirectURL);
+	if (config->download_rate > 0) {
+		fprintf(fp, "Download rate limit threshold (default per client): %llu kbit/s\n", config->download_rate);
+		fprintf(fp, "Download Burst Interval %u seconds\n", downloadburst);
+	} else {
+		fprintf(fp, "Download rate limit threshold (default per client): no limit\n");
+	}
+	if (config->upload_rate > 0) {
+		fprintf(fp, "Upload rate limit threshold (default per client): %llu kbit/s\n", config->upload_rate);
+		fprintf(fp, "Upload Burst Interval %u seconds\n", uploadburst);
+	} else {
+		fprintf(fp, "Upload rate limit threshold (default per client): no limit\n");
 	}
 
-	fprintf(fp, "Traffic control: %s\n", config->traffic_control ? "yes" : "no");
-
-	if (config->traffic_control) {
-		if (config->download_limit > 0) {
-			fprintf(fp, "Download rate limit: %d kbit/s\n", config->download_limit);
-		} else {
-			fprintf(fp, "Download rate limit: none\n");
-		}
-		if (config->upload_limit > 0) {
-			fprintf(fp, "Upload rate limit: %d kbit/s\n", config->upload_limit);
-		} else {
-			fprintf(fp, "Upload rate limit: none\n");
-		}
+	if (config->download_quota > 0) {
+		fprintf(fp, "Download quota (default per client): %llu kB\n", config->download_quota);
+	} else {
+		fprintf(fp, "Download quota (default per client): no limit\n");
 	}
+	if (config->upload_quota > 0) {
+		fprintf(fp, "Upload quota (default per client): %llu kB\n", config->upload_quota);
+	} else {
+		fprintf(fp, "Upload quota (default per client): no limit\n");
+	}
+
 
 	download_bytes = iptables_fw_total_download();
-	fprintf(fp, "Total download: %llu kByte", download_bytes / 1000);
-	fprintf(fp, "; avg: %.2f kbit/s\n", ((double) download_bytes) / 125 / uptimesecs);
+	fprintf(fp, "Total download: %llu kByte", download_bytes / 1024);
+	fprintf(fp, "; average: %.2f kbit/s\n", ((double) download_bytes) / 125 / uptimesecs);
 
 	upload_bytes = iptables_fw_total_upload();
-	fprintf(fp, "Total upload: %llu kByte", upload_bytes / 1000);
-	fprintf(fp, "; avg: %.2f kbit/s\n", ((double) upload_bytes) / 125 / uptimesecs);
+	fprintf(fp, "Total upload: %llu kByte", upload_bytes / 1024);
+	fprintf(fp, "; average: %.2f kbit/s\n", ((double) upload_bytes) / 125 / uptimesecs);
+
 	fprintf(fp, "====\n");
 	fprintf(fp, "Client authentications since start: %u\n", authenticated_since_start);
 
@@ -504,6 +998,13 @@ ndsctl_status(FILE *fp)
 	indx = 0;
 	while (client != NULL) {
 		fprintf(fp, "Client %d\n", indx);
+
+		if (!client->client_type || strlen(client->client_type) == 0) {
+			fprintf(fp, "  Client Type: %s\n", "cpd_can");
+		} else {
+			fprintf(fp, "  Client Type: %s\n", client->client_type);
+		}
+
 
 		fprintf(fp, "  IP: %s MAC: %s\n", client->ip, client->mac);
 
@@ -528,8 +1029,48 @@ ndsctl_status(FILE *fp)
 		}
 
 		fprintf(fp, "  Token: %s\n", client->token ? client->token : "none");
-
 		fprintf(fp, "  State: %s\n", fw_connection_state_as_string(client->fw_connection_state));
+
+		if (client->download_rate == 0) {
+			fprintf(fp, "  Download Rate Limit Threshold: not set\n");
+		} else {
+			fprintf(fp, "  Download Rate Limit Threshold: %llu kb/s\n", client->download_rate);
+
+			if (client->inc_packet_limit == 0) {
+				fprintf(fp, "  Download Packet Rate Limit: Not active\n");
+				fprintf(fp, "  Download Bucket Size: Not active\n");
+			} else {
+				fprintf(fp, "  Download Packet Rate Limit: %llu packets/min\n", client->inc_packet_limit);
+				fprintf(fp, "  Download Bucket Size: %llu packets\n", client->download_bucket_size);
+			}
+		}
+
+
+		if (client->upload_rate == 0) {
+			fprintf(fp, "  Upload Rate Limit Threshold: not set\n");
+		} else {
+			fprintf(fp, "  Upload Rate Limit Threshold: %llu kb/s\n", client->upload_rate);
+
+			if (client->out_packet_limit == 0) {
+				fprintf(fp, "  Upload Packet Rate Limit: Not active\n");
+				fprintf(fp, "  Upload Bucket Size: Not active\n");
+			} else {
+				fprintf(fp, "  Upload Packet Rate Limit: %llu packets/min\n", client->out_packet_limit);
+				fprintf(fp, "  Upload Bucket Size: %llu packets\n", client->upload_bucket_size);
+			}
+		}
+
+		if (client->download_quota == 0) {
+			fprintf(fp, "  Download quota: not set\n");
+		} else {
+			fprintf(fp, "  Download quota: %llu kB\n", client->download_quota);
+		}
+
+		if (client->upload_quota == 0) {
+			fprintf(fp, "  Upload quota: not set\n");
+		} else {
+			fprintf(fp, "  Upload quota: %llu kB\n", client->upload_quota);
+		}
 
 		download_bytes = client->counters.incoming;
 		upload_bytes = client->counters.outgoing;
@@ -540,9 +1081,15 @@ ndsctl_status(FILE *fp)
 			durationsecs = 1;
 		}
 
-		fprintf(fp, "  Download: %llu kByte; avg: %.2f kbit/s\n  Upload:   %llu kByte; avg: %.2f kbit/s\n\n",
-				download_bytes / 1000, ((double)download_bytes) / 125 / durationsecs,
-				upload_bytes / 1000, ((double)upload_bytes) / 125 / durationsecs);
+		fprintf(fp, "  Download this session: %llu kB; Session average: %.2f kb/s\n",
+			download_bytes / 1024,
+			((double)download_bytes) / 125 / durationsecs)
+		;
+
+		fprintf(fp, "  Upload this session: %llu kB; Session average: %.2f kb/s\n\n",
+			upload_bytes / 1024,
+			((double)upload_bytes) / 125 / durationsecs)
+		;
 
 		indx++;
 		client = client->next;
@@ -551,134 +1098,218 @@ ndsctl_status(FILE *fp)
 	UNLOCK_CLIENT_LIST();
 
 	fprintf(fp, "====\n");
-
-	fprintf(fp, "Blocked MAC addresses:");
-
-	if (config->macmechanism == MAC_ALLOW) {
-		fprintf(fp, " N/A\n");
-	} else  if (config->blockedmaclist != NULL) {
-		fprintf(fp, "\n");
-		for (block_mac = config->blockedmaclist; block_mac != NULL; block_mac = block_mac->next) {
-			fprintf(fp, "  %s\n", block_mac->mac);
-		}
-	} else {
-		fprintf(fp, " none\n");
-	}
-
-	fprintf(fp, "Allowed MAC addresses:");
-
-	if (config->macmechanism == MAC_BLOCK) {
-		fprintf(fp, " N/A\n");
-	} else  if (config->allowedmaclist != NULL) {
-		fprintf(fp, "\n");
-		for (allow_mac = config->allowedmaclist; allow_mac != NULL; allow_mac = allow_mac->next) {
-			fprintf(fp, "  %s\n", allow_mac->mac);
-		}
-	} else {
-		fprintf(fp, " none\n");
-	}
-
-	fprintf(fp, "Trusted MAC addresses:");
+	fprintf(fp, "Trusted MAC addresses:\n");
 
 	if (config->trustedmaclist != NULL) {
-		fprintf(fp, "\n");
+
 		for (trust_mac = config->trustedmaclist; trust_mac != NULL; trust_mac = trust_mac->next) {
-			fprintf(fp, "  %s\n", trust_mac->mac);
+			fprintf(fp, "%s\n", trust_mac->mac);
 		}
 	} else {
-		fprintf(fp, " none\n");
+		fprintf(fp, "none\n");
 	}
+
+	fprintf(fp, "====\n");
+	fprintf(fp, "Walledgarden FQDNs:\n");
+
+	msg = safe_calloc(SMALL_BUF);
+
+	if (execute_ret_url_encoded(msg, STATUS_BUF - 1, "/usr/lib/opennds/libopennds.sh get_list_from_config walledgarden_fqdn_list newlines") == 0) {
+
+		if (strcmp(msg, "") == 0) {
+			fprintf(fp, "none");
+
+		} else {
+			debug(LOG_INFO, "Walledgarden fqdn(s) [ %s ]", msg);
+			fprintf(fp, "%s", msg);
+		}
+	}
+	free(msg);
+
+	fprintf(fp, "\n");
+	fprintf(fp, "\n");
+	fprintf(fp, "Walledgarden Ports:\n");
+
+	msg = safe_calloc(SMALL_BUF);
+
+	if (execute_ret_url_encoded(msg, STATUS_BUF - 1, "/usr/lib/opennds/libopennds.sh get_list_from_config walledgarden_port_list newlines") == 0) {
+
+		if (strcmp(msg, "") == 0) {
+			fprintf(fp, "all");
+
+		} else {
+			debug(LOG_INFO, "Walledgarden port(s) [ %s ]", msg);
+			fprintf(fp, "%s", msg);
+		}
+	}
+	fprintf(fp, "\n");
+	free(msg);
+
+	fprintf(fp, "====\n");
+	fprintf(fp, "Blocklist FQDNs:\n");
+
+	msg = safe_calloc(SMALL_BUF);
+
+	if (execute_ret_url_encoded(msg, STATUS_BUF - 1, "/usr/lib/opennds/libopennds.sh get_list_from_config blocklist_fqdn_list newlines") == 0) {
+
+		if (strcmp(msg, "") == 0) {
+			fprintf(fp, "none");
+
+		} else {
+			debug(LOG_INFO, "Blocklist fqdn(s) [ %s ]", msg);
+			fprintf(fp, "%s", msg);
+		}
+	}
+	free(msg);
+
+	fprintf(fp, "\n");
+	fprintf(fp, "\n");
+	fprintf(fp, "Blocklist Ports:\n");
+
+	msg = safe_calloc(SMALL_BUF);
+
+	if (execute_ret_url_encoded(msg, STATUS_BUF - 1, "/usr/lib/opennds/libopennds.sh get_list_from_config blocklist_port_list newlines") == 0) {
+
+		if (strcmp(msg, "") == 0) {
+			fprintf(fp, "all\n");
+
+		} else {
+			debug(LOG_INFO, "Blocklist port(s) [ %s ]", msg);
+			fprintf(fp, "%s\n", msg);
+		}
+	}
+
+	free(msg);
 
 	fprintf(fp, "========\n");
 }
 
-void
-ndsctl_clients(FILE *fp)
-{
-	t_client *client;
-	int indx;
-	unsigned long int now, durationsecs = 0;
-	unsigned long long int download_bytes, upload_bytes;
-
-	now = time(NULL);
-
-	// Update the client's counters so info is current
-	iptables_fw_counters_update();
-
-	LOCK_CLIENT_LIST();
-
-	fprintf(fp, "%d\n", get_client_list_length());
-
-	client = client_get_first_client();
-	if (client) {
-		fprintf(fp, "\n");
-	}
-
-	indx = 0;
-	while (client != NULL) {
-		fprintf(fp, "client_id=%d\n", indx);
-		fprintf(fp, "ip=%s\nmac=%s\n", client->ip, client->mac);
-		fprintf(fp, "added=%lld\n", (long long) client->session_start);
-		fprintf(fp, "active=%lld\n", (long long) client->counters.last_updated);
-		if (client->session_start) {
-			fprintf(fp, "duration=%lu\n", now - client->session_start);
-		} else {
-			fprintf(fp, "duration=%lu\n", 0ul);
-		}
-		fprintf(fp, "token=%s\n", client->token ? client->token : "none");
-		fprintf(fp, "state=%s\n", fw_connection_state_as_string(client->fw_connection_state));
-
-		durationsecs = now - client->session_start;
-		download_bytes = client->counters.incoming;
-		upload_bytes = client->counters.outgoing;
-
-		fprintf(fp, "downloaded=%llu\n", download_bytes/1000);
-		fprintf(fp, "avg_down_speed=%.2f\n", ((double)download_bytes) / 125 / durationsecs);
-		fprintf(fp, "uploaded=%llu\n", upload_bytes/1000);
-		fprintf(fp, "avg_up_speed=%.2f\n\n", ((double)upload_bytes) / 125 / durationsecs);
-
-		indx++;
-		client = client->next;
-	}
-
-	UNLOCK_CLIENT_LIST();
-}
-
 static void
-ndsctl_json_client(FILE *fp, const t_client *client, time_t now)
+ndsctl_json_client(FILE *fp, const t_client *client, time_t now, char *indent)
 {
 	unsigned long int durationsecs;
 	unsigned long long int download_bytes, upload_bytes;
+	char *clientif;
+	s_config *config;
 
-	fprintf(fp, "\"id\":\"%d\",\n", client->id);
-	fprintf(fp, "\"ip\":\"%s\",\n", client->ip);
-	fprintf(fp, "\"mac\":\"%s\",\n", client->mac);
-	fprintf(fp, "\"added\":\"%lld\",\n", (long long) client->session_start);
-	fprintf(fp, "\"active\":\"%lld\",\n", (long long) client->counters.last_updated);
-	if (client->session_start) {
-		fprintf(fp, "\"duration\":\"%lu\",\n", now - client->session_start);
+	config = config_get_config();
+
+	clientif = safe_calloc(STATUS_BUF);
+	get_client_interface(clientif, STATUS_BUF, client->mac);
+
+	fprintf(fp, "  %s\"gatewayname\":\"%s\",\n", indent, config->url_encoded_gw_name);
+	fprintf(fp, "  %s\"gatewayaddress\":\"%s\",\n", indent, config->gw_address);
+	fprintf(fp, "  %s\"gatewayfqdn\":\"%s\",\n", indent, config->gw_fqdn);
+	fprintf(fp, "  %s\"version\":\"%s\",\n", indent, VERSION);
+
+	if (!client->client_type || strlen(client->client_type) == 0) {
+		fprintf(fp, "  %s\"client_type\":\"%s\",\n", indent, "cpd_can");
 	} else {
-		fprintf(fp, "\"duration\":\"%lu\",\n", 0ul);
+		fprintf(fp, "  %s\"client_type\":\"%s\",\n", indent, client->client_type);
 	}
-	fprintf(fp, "\"token\":\"%s\",\n", client->token ? client->token : "none");
-	fprintf(fp, "\"state\":\"%s\",\n", fw_connection_state_as_string(client->fw_connection_state));
+
+	fprintf(fp, "  %s\"mac\":\"%s\",\n", indent, client->mac);
+	fprintf(fp, "  %s\"ip\":\"%s\",\n", indent, client->ip);
+	fprintf(fp, "  %s\"clientif\":\"%s\",\n", indent, clientif);
+	fprintf(fp, "  %s\"session_start\":\"%lld\",\n", indent, (long long) client->session_start);
+
+	free(clientif);
+
+	if (client->session_end == 0) {
+		fprintf(fp, "  %s\"session_end\":\"null\",\n", indent);
+	} else {
+		fprintf(fp, "  %s\"session_end\":\"%lld\",\n", indent, (long long) client->session_end);
+	}
+
+	fprintf(fp, "  %s\"last_active\":\"%lld\",\n", indent, (long long) client->counters.last_updated);
+	fprintf(fp, "  %s\"token\":\"%s\",\n", indent, client->token ? client->token : "none");
+	fprintf(fp, "  %s\"state\":\"%s\",\n", indent, fw_connection_state_as_string(client->fw_connection_state));
+
+	if (!client->custom || strlen(client->custom) == 0) {
+		fprintf(fp, "  %s\"custom\":\"%s\",\n", indent, "none");
+	} else {
+		fprintf(fp, "  %s\"custom\":\"%s\",\n", indent, client->custom);
+	}
 
 	durationsecs = now - client->session_start;
 	download_bytes = client->counters.incoming;
 	upload_bytes = client->counters.outgoing;
 
-	fprintf(fp, "\"downloaded\":\"%llu\",\n", download_bytes / 1000);
-	fprintf(fp, "\"avg_down_speed\":\"%.2f\",\n", ((double)download_bytes) / 125 / durationsecs);
-	fprintf(fp, "\"uploaded\":\"%llu\",\n", upload_bytes / 1000);
-	fprintf(fp, "\"avg_up_speed\":\"%.2f\"\n", ((double)upload_bytes)/ 125 / durationsecs);
+	if (client->download_rate == 0) {
+		fprintf(fp, "  %s\"download_rate_limit_threshold\":\"null\",\n", indent);
+		fprintf(fp, "  %s\"download_packet_rate\":\"null\",\n", indent);
+		fprintf(fp, "  %s\"download_bucket_size\":\"null\",\n", indent);
+	} else {
+		fprintf(fp, "  %s\"download_rate_limit_threshold\":\"%llu\",\n", indent, client->download_rate);
+
+		if (client->inc_packet_limit == 0) {
+			fprintf(fp, "  %s\"download_packet_rate\":\"null\",\n", indent);
+			fprintf(fp, "  %s\"download_bucket_size\":\"null\",\n", indent);
+		} else {
+			fprintf(fp, "  %s\"download_packet_rate\":\"%llu\",\n", indent, client->inc_packet_limit);
+			fprintf(fp, "  %s\"download_bucket_size\":\"%llu\",\n", indent, client->download_bucket_size);
+		}
+	}
+
+	if (client->upload_rate == 0) {
+		fprintf(fp, "  %s\"upload_rate_limit_threshold\":\"null\",\n", indent);
+		fprintf(fp, "  %s\"upload_packet_rate\":\"null\",\n", indent);
+		fprintf(fp, "  %s\"upload_bucket_size\":\"null\",\n", indent);
+	} else {
+		fprintf(fp, "  %s\"upload_rate_limit_threshold\":\"%llu\",\n", indent, client->upload_rate);
+
+		if (client->out_packet_limit == 0) {
+			fprintf(fp, "  %s\"upload_packet_rate\":\"null\",\n", indent);
+			fprintf(fp, "  %s\"upload_bucket_size\":\"null\",\n", indent);
+		} else {
+			fprintf(fp, "  %s\"upload_packet_rate\":\"%llu\",\n", indent, client->out_packet_limit);
+			fprintf(fp, "  %s\"upload_bucket_size\":\"%llu\",\n", indent, client->upload_bucket_size);
+		}
+	}
+
+	if (client->download_quota == 0) {
+		fprintf(fp, "  %s\"download_quota\":\"null\",\n", indent);
+	} else {
+		fprintf(fp, "  %s\"download_quota\":\"%llu\",\n", indent, client->download_quota);
+	}
+
+	if (client->upload_quota == 0) {
+		fprintf(fp, "  %s\"upload_quota\":\"null\",\n", indent);
+	} else {
+		fprintf(fp, "  %s\"upload_quota\":\"%llu\",\n", indent, client->upload_quota);
+	}
+
+	// prevent divison by 0
+	if (durationsecs < 1) {
+		durationsecs = 1;
+	}
+
+	fprintf(fp, "  %s\"download_this_session\":\"%llu\",\n",
+		indent,
+		(download_bytes / 1024)
+	);
+
+	fprintf(fp, "  %s\"download_session_avg\":\"%.2f\",\n",
+		indent,
+		(double)download_bytes / 125 / durationsecs
+	);
+
+	fprintf(fp, "  %s\"upload_this_session\":\"%llu\",\n",
+		indent,
+		(upload_bytes / 1024)
+	);
+
+	fprintf(fp, "  %s\"upload_session_avg\":\"%.2f\"\n",
+		indent,
+		(double)upload_bytes / 125 / durationsecs
+	);
 }
 
 static void
-ndsctl_json_one(FILE *fp, const char *arg)
+ndsctl_json_one(FILE *fp, const char *arg, char *indent)
 {
 	t_client *client;
 	time_t now;
-
 	now = time(NULL);
 
 	// Update the client's counters so info is current
@@ -690,7 +1321,7 @@ ndsctl_json_one(FILE *fp, const char *arg)
 
 	if (client) {
 		fprintf(fp, "{\n");
-		ndsctl_json_client(fp, client, now);
+		ndsctl_json_client(fp, client, now, indent);
 		fprintf(fp, "}\n");
 	} else {
 		fprintf(fp, "{}\n");
@@ -700,7 +1331,7 @@ ndsctl_json_one(FILE *fp, const char *arg)
 }
 
 static void
-ndsctl_json_all(FILE *fp)
+ndsctl_json_all(FILE *fp, char *indent)
 {
 	t_client *client;
 	time_t now;
@@ -717,61 +1348,69 @@ ndsctl_json_all(FILE *fp)
 
 	LOCK_CLIENT_LIST();
 
-	fprintf(fp, "{\n\"client_list_length\": \"%d\",\n", get_client_list_length());
+	fprintf(fp, "{\n  \"client_list_length\":\"%d\",\n", get_client_list_length());
 
 	client = client_get_first_client();
 
-	fprintf(fp, "\"clients\":{\n");
+	fprintf(fp, "  \"clients\":{\n");
 
 	while (client != NULL) {
-		fprintf(fp, "\"%s\":{\n", client->mac);
-		ndsctl_json_client(fp, client, now);
+		fprintf(fp, "%s\"%s\":{\n", indent, client->mac);
+		ndsctl_json_client(fp, client, now, indent);
 
 		client = client->next;
 		if (client) {
-			fprintf(fp, "},\n");
+			fprintf(fp, "%s},\n", indent);
 		} else {
-			fprintf(fp, "}\n");
+			fprintf(fp, "%s}\n", indent);
 		}
 	}
-
-	fprintf(fp, "}\n}\n");
 
 	UNLOCK_CLIENT_LIST();
 
 	// Trusted mac list
 	if (config->trustedmaclist != NULL) {
-
+		fprintf(fp, "  },\n");
 		// count the number of trusted mac addresses
 		for (trust_mac = config->trustedmaclist; trust_mac != NULL; trust_mac = trust_mac->next) {
 			count++;
 		}
 
 		// output the count of trusted macs and list them in json array format
-		fprintf(fp, "{\n\"trusted_list_length\": \"%d\",\n", count);
-		fprintf(fp, "\"trusted\":[\n");
+		fprintf(fp, "  \"trusted_list_length\":\"%d\",\n", count);
+		fprintf(fp, "  \"trusted\":[\n");
 
 		for (trust_mac = config->trustedmaclist; trust_mac != NULL; trust_mac = trust_mac->next) {
 
 			if (count > 1) {
-				fprintf(fp, "\"%s\",\n", trust_mac->mac);
+				fprintf(fp, "    \"%s\",\n", trust_mac->mac);
 				count--;
 			} else {
-				fprintf(fp, "\"%s\"\n", trust_mac->mac);
+				fprintf(fp, "    \"%s\"\n", trust_mac->mac);
 			}
 		}
 
-		fprintf(fp, "]\n}\n");
+		fprintf(fp, "  ]\n");
+	} else {
+		fprintf(fp, "  }\n");
 	}
+	fprintf(fp, "}\n");
 }
 
 void
 ndsctl_json(FILE *fp, const char *arg)
 {
-	if (arg && strlen(arg)) {
-		ndsctl_json_one(fp, arg);
+	char indent[5] = {0};
+
+	memset(indent, 0, 5);
+
+	debug(LOG_DEBUG, "arg [%s %d]", arg, strlen(arg));
+
+	if (strlen(arg) > 6) {
+		ndsctl_json_one(fp, arg, indent);
 	} else {
-		ndsctl_json_all(fp);
+		snprintf(indent, sizeof(indent), "%s", "    ");
+		ndsctl_json_all(fp, indent);
 	}
 }
 

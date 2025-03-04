@@ -21,7 +21,7 @@
 /* @file ndsctl_thread.c
     @brief Monitoring and control of opennds, server part
     @author Copyright (C) 2004 Alexandre Carmel-Veilleux <acv@acv.ca>
-    trivially modified for opennds
+    @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
 */
 
 #define _GNU_SOURCE
@@ -53,6 +53,7 @@
 #include "main.h"
 
 #include "ndsctl_thread.h"
+#include "http_microhttpd_utils.h"
 
 #define MAX_EVENT_SIZE 30
 
@@ -61,10 +62,6 @@ extern pthread_mutex_t client_list_mutex;
 extern pthread_mutex_t config_mutex;
 
 static int ndsctl_handler(int fd);
-static void ndsctl_block(FILE *fp, char *arg);
-static void ndsctl_unblock(FILE *fp, char *arg);
-static void ndsctl_allow(FILE *fp, char *arg);
-static void ndsctl_unallow(FILE *fp, char *arg);
 static void ndsctl_trust(FILE *fp, char *arg);
 static void ndsctl_untrust(FILE *fp, char *arg);
 static void ndsctl_auth(FILE *fp, char *arg);
@@ -90,40 +87,35 @@ thread_ndsctl(void *arg)
 	int number_of_count;
 	int i;
 
-	debug(LOG_DEBUG, "Starting ndsctl.");
+	debug(LOG_DEBUG, "Starting ndsctl thread");
 
 	memset(&sa_un, 0, sizeof(sa_un));
 	sock_name = (char *)arg;
 	debug(LOG_DEBUG, "Socket name: %s", sock_name);
 
 	if (strlen(sock_name) > (sizeof(sa_un.sun_path) - 1)) {
-		// TODO: Die handler with logging....
 		debug(LOG_ERR, "NDSCTL socket name too long");
 		exit(1);
 	}
 
-	debug(LOG_DEBUG, "Creating socket");
-	sock = socket(PF_UNIX, SOCK_STREAM, 0);
+	// Use AF_UNIX, not PF_UNIX, AF_LOCAL or PF_LOCAL
+	sock = socket(AF_UNIX, SOCK_STREAM, 0);
 
-	debug(LOG_DEBUG, "Got server socket %d", sock);
-
-	// If it exists, delete... Not the cleanest way to deal.
+	// If socket file exists, delete it..
 	unlink(sock_name);
 
-	debug(LOG_DEBUG, "Filling sockaddr_un");
-	strcpy(sa_un.sun_path, sock_name); // XXX No size check because we check a few lines before.
+	strcpy(sa_un.sun_path, sock_name);
 	sa_un.sun_family = AF_UNIX;
 
-	debug(LOG_DEBUG, "Binding socket (%s) (%d)", sa_un.sun_path, strlen(sock_name));
+	debug(LOG_DEBUG, "Binding socket [%s] Socket descriptor [%d]", sa_un.sun_path, sock);
 
-	// Which to use, AF_UNIX, PF_UNIX, AF_LOCAL, PF_LOCAL?
 	if (bind(sock, (struct sockaddr *)&sa_un, strlen(sock_name) + sizeof(sa_un.sun_family))) {
-		debug(LOG_ERR, "Could not bind control socket: %s", strerror(errno));
+		debug(LOG_ERR, "Could not bind control socket: [%s] Terminating...", strerror(errno));
 		pthread_exit(NULL);
 	}
 
 	if (listen(sock, 5)) {
-		debug(LOG_ERR, "Could not listen on control socket: %s", strerror(errno));
+		debug(LOG_ERR, "Could not listen on control socket: [%s] Terminating...", strerror(errno));
 		pthread_exit(NULL);
 	}
 
@@ -134,7 +126,7 @@ thread_ndsctl(void *arg)
 	ev.data.fd = sock;
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock, &ev) < 0) {
-		debug(LOG_ERR, "Could not insert socket fd to epoll set: %s", strerror(errno));
+		debug(LOG_ERR, "Could not insert socket fd to epoll set: [%s] Terminating...", strerror(errno));
 		pthread_exit(NULL);
 	}
 
@@ -146,6 +138,8 @@ thread_ndsctl(void *arg)
 	}
 
 	current_fd_count = 1;
+
+	debug(LOG_DEBUG, "Entering ndsctl thread loop");
 
 	while (1) {
 		memset(&sa_un, 0, sizeof(sa_un));
@@ -208,7 +202,6 @@ thread_ndsctl(void *arg)
 				if (events[i].data.fd > 0) {
 					events[i].data.fd = 0;
 				}
-
 			}
 		}
 	}
@@ -221,17 +214,19 @@ ndsctl_handler(int fd)
 {
 	int done, i, ret = 0;
 	char request[MAX_BUF];
-	ssize_t read_bytes, len;
+	//ssize_t read_bytes, len;
+	int read_bytes, len;
 	FILE* fp;
 
 	debug(LOG_DEBUG, "Entering thread_ndsctl_handler....");
-	debug(LOG_DEBUG, "Read bytes and stuff from descriptor %d", fd);
 
 	// Init variables
 	read_bytes = 0;
 	done = 0;
 	memset(request, 0, sizeof(request));
 	fp = fdopen(fd, "w");
+
+	debug(LOG_DEBUG, "Read bytes and stuff from socket descriptor [%d], pointer [%lu]", fd, fp);
 
 	// Read....
 	while (!done && read_bytes < (sizeof(request) - 1)) {
@@ -253,21 +248,11 @@ ndsctl_handler(int fd)
 
 	if (strncmp(request, "status", 6) == 0) {
 		ndsctl_status(fp);
-	} else if (strncmp(request, "clients", 7) == 0) {
-		ndsctl_clients(fp);
 	} else if (strncmp(request, "json", 4) == 0) {
 		ndsctl_json(fp, (request + 5));
 	} else if (strncmp(request, "stop", 4) == 0) {
 		// tell the caller to stop the thread
 		ret = 1;
-	} else if (strncmp(request, "block", 5) == 0) {
-		ndsctl_block(fp, (request + 6));
-	} else if (strncmp(request, "unblock", 7) == 0) {
-		ndsctl_unblock(fp, (request + 8));
-	} else if (strncmp(request, "allow", 5) == 0) {
-		ndsctl_allow(fp, (request + 6));
-	} else if (strncmp(request, "unallow", 7) == 0) {
-		ndsctl_unallow(fp, (request + 8));
 	} else if (strncmp(request, "trust", 5) == 0) {
 		ndsctl_trust(fp, (request + 6));
 	} else if (strncmp(request, "untrust", 7) == 0) {
@@ -298,39 +283,199 @@ ndsctl_auth(FILE *fp, char *arg)
 	s_config *config = config_get_config();
 	t_client *client;
 	unsigned id;
-	int rc;
+	int rc = -1;
 	int seconds = 60 * config->session_timeout;
-	int upload = 0;
-	int download = 0;
+	int custom_seconds;
+	int uploadrate = config->upload_rate;
+	int downloadrate = config->download_rate;
+	unsigned long long int uploadquota = config->upload_quota;
+	unsigned long long int downloadquota = config->download_quota;
+	char *libcmd;
+	char *msg;
+	char *customdata;
+	char *argcopy;
+	const char *arg2;
+	const char *arg3;
+	const char *arg4;
+	const char *arg5;
+	const char *arg6;
+	const char *arg7;
+	const char *arg8;
+	char *ptr;
+	const char *ipclient;
+	const char *macclient;
 	time_t now = time(NULL);
-
-	//TODO - support for setting alternate values for seconds, upload and download can be implemented here by calling a BinAuth script
 
 	debug(LOG_DEBUG, "Entering ndsctl_auth [%s]", arg);
 
+	argcopy=strdup(arg);
+
+	// arg2 = ip|mac|tok
+	arg2 = strsep(&argcopy, ",");
+	debug(LOG_DEBUG, "arg2 [%s]", arg2);
+
+	// arg3 = scheduled duration (minutes) until deauth
+	arg3 = strsep(&argcopy, ",");
+	debug(LOG_DEBUG, "arg3 [%s]", arg3);
+
+	if (arg3 != NULL) {
+		custom_seconds = 60 * strtol(arg3, &ptr, 10);
+		if (custom_seconds > 0) {
+			seconds = custom_seconds;
+		}
+	}
+	debug(LOG_DEBUG, "Client session duration [%d] seconds", seconds);
+
+	// arg4 = upload rate (kb/s)
+	arg4 = strsep(&argcopy, ",");
+	debug(LOG_DEBUG, "arg4 [%s]", arg4);
+
+	if (arg4 != NULL) {
+		uploadrate = strtol(arg4, &ptr, 10);
+	}
+
+	// arg5 = download rate (kb/s)
+	arg5 = strsep(&argcopy, ",");
+	debug(LOG_DEBUG, "arg5 [%s]", arg5);
+
+	if (arg5 != NULL) {
+		downloadrate = strtol(arg5, &ptr, 10);
+	}
+
+	// arg6 = upload quota (kB)
+	arg6 = strsep(&argcopy, ",");
+	debug(LOG_DEBUG, "arg6 [%s]", arg6);
+
+	if (arg6 != NULL) {
+		uploadquota = strtoll(arg6, &ptr, 10);
+	}
+
+	// arg7 = download quota (kB)
+	arg7 = strsep(&argcopy, ",");
+	debug(LOG_DEBUG, "arg7 [%s]", arg7);
+
+	if (arg7 != NULL) {
+		downloadquota = strtoll(arg7, &ptr, 10);
+	}
+
+	// arg8 = custom data string - max 256 characters
+	arg8 = strsep(&argcopy, ",");
+	debug(LOG_DEBUG, "arg8 [%s]", arg8);
+
+	customdata = safe_calloc(CUSTOM_ENC);
+
+	if (arg8 != NULL) {
+	snprintf(customdata, CUSTOM_ENC, "%s", arg8);
+	debug(LOG_DEBUG, "customdata [%s]", customdata);
+	}
+
 	LOCK_CLIENT_LIST();
-	client = client_list_find_by_any(arg, arg, arg);
+	debug(LOG_DEBUG, "find in client list - arg2: [%s]", arg2);
+	client = client_list_find_by_any(arg2, arg2, arg2);
 	id = client ? client->id : 0;
+	debug(LOG_DEBUG, "client id: [%d]", id);
+
+	if (!id  && config->allow_preemptive_authentication == 1) {
+		// Client is neither preauthenticated nor authenticated
+		// If Preemptive authentication is enabled we should try to auth by mac
+		debug(LOG_DEBUG, "Client is not in client list.");
+		// Build command to get client mac and ip
+		libcmd = safe_calloc(SMALL_BUF);
+		safe_snprintf(libcmd, SMALL_BUF, "/usr/lib/opennds/libopennds.sh clientaddress \"%s\"", arg2 );
+
+		msg = safe_calloc(64);
+		rc = execute_ret_url_encoded(msg, 64 - 1, libcmd);
+		free(libcmd);
+
+		if (rc == 0) {
+			debug(LOG_DEBUG, "Client ip/mac: %s", msg);
+
+			if (strcmp(msg, "-") == 0) {
+				debug(LOG_DEBUG, "Client [%s] is not connected", arg2);
+			} else {
+				ipclient = strtok(msg, " ");
+				macclient = strtok(NULL, " ");
+				debug(LOG_DEBUG, "Client ip [%s], mac [%s]", ipclient, macclient);
+
+				// check if client ip is on our subnet
+				safe_asprintf(&libcmd, "/usr/lib/opennds/libopennds.sh get_interface_by_ip \"%s\"", ipclient);
+				msg = safe_calloc(64);
+				rc = execute_ret_url_encoded(msg, 64 - 1, libcmd);
+				free(libcmd);
+
+				if (rc == 0) {
+
+					if (strcmp(config->gw_interface, msg) == 0) {
+						debug(LOG_DEBUG, "Pre-emptive Authentication: Client [%s] is on our subnet using interface [%s]", ipclient, msg);
+
+						client = client_list_add_client(macclient, ipclient);
+
+						if (client) {
+							id = client ? client->id : 0;
+							debug(LOG_DEBUG, "client id: [%d]", id);
+							client->client_type = "preemptive";
+
+							// log the preemptive authentication
+							safe_asprintf(&libcmd,
+								"/usr/lib/opennds/libopennds.sh write_log \"mac=%s, ip=%s, client_type=%s\"",
+								macclient,
+								ipclient,
+								client->client_type
+							);
+
+							msg = safe_calloc(64);
+							rc = execute_ret_url_encoded(msg, 64 - 1, libcmd);
+							free(libcmd);
+						}
+
+					} else {
+						debug(LOG_NOTICE, "Pre-emptive Authentication: Client ip address [%s] is  NOT on our subnet", ipclient);
+						id = 0;
+					}
+				} else {
+					debug(LOG_DEBUG, "ip subnet test failed: Continuing...");
+				}
+			}
+		free(msg);
+
+		} else {
+			debug(LOG_DEBUG, "Client connection not found: Continuing...");
+			rc = -1;
+		}
+	}
 
 	if (id) {
-		rc = auth_client_auth_nolock(id, "ndsctl_auth");
+
+		if (strcmp(fw_connection_state_as_string(client->fw_connection_state), "Preauthenticated") == 0) {
+			// set client values
+			client->session_start = now;
+
+			if (seconds > 0) {
+				client->session_end = now + seconds;
+			} else {
+				client->session_end = 0;
+			}
+
+			client->upload_rate = uploadrate;
+			client->download_rate = downloadrate;
+			client->upload_quota = uploadquota;
+			client->download_quota = downloadquota;
+
+			debug(LOG_DEBUG, "ndsctl_thread: client session start time [ %lu ], end time [ %lu ]", now, client->session_end);
+
+			rc = auth_client_auth_nolock(id, "ndsctl_auth", customdata);
+		}
+
+	free(argcopy);
+
 	} else {
-		debug(LOG_DEBUG, "Client not found.");
+		// Client is neither preauthenticated nor authenticated
+		// If Preemptive authentication is enabled we should have tried to auth by mac
+		debug(LOG_DEBUG, "Client is not in client list.");
 		rc = -1;
 	}
+
 	UNLOCK_CLIENT_LIST();
-
-	// set client values
-	client->download_limit = download;
-	client->upload_limit = upload;
-	client->session_start = now;
-
-	if (seconds) {
-		client->session_end = now + seconds;
-	} else {
-		client->session_end = 0;
-	}
-
 
 	if (rc == 0) {
 		fprintf(fp, "Yes");
@@ -338,6 +483,7 @@ ndsctl_auth(FILE *fp, char *arg)
 		fprintf(fp, "No");
 	}
 
+	free(customdata);
 	debug(LOG_DEBUG, "Exiting ndsctl_auth...");
 }
 
@@ -369,74 +515,6 @@ ndsctl_deauth(FILE *fp, char *arg)
 	}
 
 	debug(LOG_DEBUG, "Exiting ndsctl_deauth...");
-}
-
-static void
-ndsctl_block(FILE *fp, char *arg)
-{
-	int rc;
-
-	debug(LOG_DEBUG, "Entering ndsctl_block [%s]", arg);
-
-	rc = auth_client_block(arg);
-	if (rc == 0) {
-		fprintf(fp, "Yes");
-	} else {
-		fprintf(fp, "No");
-	}
-
-	debug(LOG_DEBUG, "Exiting ndsctl_block.");
-}
-
-static void
-ndsctl_unblock(FILE *fp, char *arg)
-{
-	int rc;
-
-	debug(LOG_DEBUG, "Entering ndsctl_unblock [%s]", arg);
-
-	rc = auth_client_unblock(arg);
-	if (rc == 0) {
-		fprintf(fp, "Yes");
-	} else {
-		fprintf(fp, "No");
-	}
-
-	debug(LOG_DEBUG, "Exiting ndsctl_unblock.");
-}
-
-static void
-ndsctl_allow(FILE *fp, char *arg)
-{
-	int rc;
-
-	debug(LOG_DEBUG, "Entering ndsctl_allow [%s]", arg);
-
-	rc = auth_client_allow(arg);
-	if (rc == 0) {
-		fprintf(fp, "Yes");
-	} else {
-		fprintf(fp, "No");
-	}
-
-	debug(LOG_DEBUG, "Exiting ndsctl_allow.");
-}
-
-static void
-ndsctl_unallow(FILE *fp, char *arg)
-{
-	int rc;
-
-	debug(LOG_DEBUG, "Entering ndsctl_unallow [%s]", arg);
-
-	rc = auth_client_unallow(arg);
-	if (rc == 0) {
-		fprintf(fp, "Yes");
-	} else {
-		fprintf(fp, "No");
-	}
-
-	debug(LOG_DEBUG, "Exiting ndsctl_unallow.");
 }
 
 static void

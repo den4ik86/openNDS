@@ -21,17 +21,13 @@
 /** @file ndsctl_thread.h
     @brief opennds monitoring thread
     @author Copyright (C) 2004 Alexandre Carmel-Veilleux <acv@acv.ca>
-    trivially modified for opennds
+    @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
 */
 
 #ifndef _NDSCTL_THREAD_H_
 #define _NDSCTL_THREAD_H_
 
-
-#define DEFAULT_NDSCTL_SOCK "/tmp/ndsctl.sock"
-
 /** @brief Listen for opennds control messages on a unix domain socket */
 void *thread_ndsctl(void *arg);
-
 
 #endif

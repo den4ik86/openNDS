@@ -21,6 +21,7 @@
 /** @file safe.h
 	@brief Safe versions of stdlib/string functions that error out and exit if memory allocation fails
 	@author Copyright (C) 2005 Mina Naguib <mina@ilesansfil.org>
+	@author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
 */
 
 #ifndef _SAFE_H_
@@ -31,6 +32,9 @@
 #include <sys/types.h> /* For fork */
 #include <unistd.h> /* For fork */
 
+/** @brief Safe version of calloc
+ */
+void * safe_calloc (size_t size);
 
 /** @brief Safe version of malloc
  */
@@ -39,6 +43,10 @@ void * safe_malloc (size_t size);
 /* @brief Safe version of strdup
  */
 char * safe_strdup(const char s[]);
+
+/* @brief Safe version of snprintf
+ */
+int safe_snprintf(char *strp, size_t size, const char *fmt, ...);
 
 /* @brief Safe version of asprintf
  */

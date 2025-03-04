@@ -22,11 +22,12 @@
     @brief nodogsplash monitoring client
     @author Copyright (C) 2004 Alexandre Carmel-Veilleux <acv@acv.ca>
     trivially modified 2007 for nodogsplash
+    @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
 */
 
 #ifndef _NDSCTL_H_
 #define _NDSCTL_H_
 
-#define DEFAULT_SOCK "/tmp/ndsctl.sock"
+#define DEFAULT_SOCKET_FILENAME "ndsctl.sock"
 
 #endif /* _NDSCTL_H_ */

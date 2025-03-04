@@ -1,21 +1,23 @@
-/*
- * uhttpd - Tiny single-threaded httpd
- *
- *	 Copyright (C) 2010-2013 Jo-Philipp Wich <xm@subsignal.org>
- *	 Copyright (C) 2013 Felix Fietkau <nbd@openwrt.org>
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+/************************************************************************\
+ * This program is free software; you can redistribute it and/or	*
+ * modify it under the terms of the GNU General Public License as	*
+ * published by the Free:Software Foundation; either version 2 of	*
+ * the License, or (at your option) any later version.			*
+ *									*
+ * This program is distributed in the hope that it will be useful,	*
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of	*
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.		*
+ * See the GNU General Public License for more details.		*
+\************************************************************************/
+
+/** @internal
+ * @file http_microhttpd_utils.c
+ * @brief a httpd implementation using libmicrohttpd
+ * @author Copyright (C) 2015 Alexander Couzens <lynxis@fe80.eu>
+ * @author Copyright (C) 2015-2023 The openNDS contributors <opennds@blue-wave.net>
+ * @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
  */
+
 
 #ifndef _UHTTPD_UTILS_
 
@@ -32,7 +34,7 @@
 #include <time.h>
 #include <unistd.h>
 
-struct uh_addr {
+/*struct uh_addr {
 	uint8_t family;
 	uint16_t port;
 	union {
@@ -40,6 +42,7 @@ struct uh_addr {
 		struct in6_addr in6;
 	};
 };
+*/
 
 #define min(x, y) (((x) < (y)) ? (x) : (y))
 #define max(x, y) (((x) > (y)) ? (x) : (y))
@@ -60,5 +63,6 @@ int htmlentityencode(char *buf, int blen, const char *src, int slen);
 int uh_urldecode(char *buf, int blen, const char *src, int slen);
 int uh_urlencode(char *buf, int blen, const char *src, int slen);
 int uh_b64decode(char *buf, int blen, const void *src, int slen);
+int b64_encode(char *buf, int blen, const void *src, int slen);
 
 #endif

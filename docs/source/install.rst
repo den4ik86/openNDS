@@ -1,18 +1,38 @@
 Installing openNDS
-######################
+##################
 
-OpenWrt
-*******
+Prerequisites
+*************
 
-* Have a router working with OpenWrt. At the time of writing, openNDS has been tested with OpenWrt 18.06.x, 19.7.x and Snapshot.
+openNDS is designed to run on a device configured as an IPv4 router and will have at least two network interfaces:
 
-* It may or may not work on older versions of OpenWrt or on other kinds of Linux-based router firmware.
+ **A WAN interface** (Wide Area Network). This interface must be connected to an Internet feed:
 
-* Make sure your router is basically working before you try to install  openNDS. In particular, make sure your DHCP daemon is serving addresses on the interface that openNDS will manage.
+ * Either an ISP CPE (Internet Service Provider Customer Premises Equipment)
+ * Or another router, such as the venue ADSL router.
+ * It must be configured as a DHCP client, obtaining its IPv4 address and DNS server from the connected network.
 
-  The default is br-lan but can be changed to any interface by editing the /etc/config/opennds file.
+ **A LAN interface** (Local Area Network). This interface MUST be configured to:
 
-* To install openNDS, you may use the OpenWrt Luci web interface or alternatively, ssh to your router and run the command:
+ * Provide the Default IPv4 gateway in a private IPv4 subnet that is different to any private subnets between it and the ISP CPE
+ * Provide DHCP services to connected clients
+ * Provide DNS services to connected clients
+ * Provide Network Address Translation (NAT) for all outgoing traffic directed to the WAN interface.
+
+If an improper routing configuration is detected, openNDS will shut down.
+
+Installing on OpenWrt
+*********************
+
+* Have a router working with OpenWrt. At the time of writing, the current version of openNDS has been tested with OpenWrt 22.03.x, 23.05.x and Master Snapshot.
+
+* openNDS v10.0.0 or higher, will not work on versions of OpenWrt less than 22.03.x
+
+* Make sure your router is working correctly before you try to install  openNDS. In particular, make sure your DHCP daemon is serving addresses on the interface that openNDS will manage.
+
+  The default interface is br-lan but can be changed to any LAN interface by editing the /etc/config/opennds file.
+
+* To install openNDS on 23.3.x or higher, you may use the OpenWrt Luci web interface or alternatively, ssh to your router and run the command:
 
     ``opkg update``
 
@@ -23,7 +43,7 @@ OpenWrt
 * openNDS is enabled by default and will start automatically on reboot or can be started and stopped manually.
 
 * If the interface that you want openNDS to manage is not br-lan,
-  edit /etc/config/opennds and set GatewayInterface.
+  edit /etc/config/opennds and set the gatewayinterface option.
 
 * To start openNDS, run the following, or just reboot the router:
 
@@ -39,7 +59,7 @@ OpenWrt
 
  If your client device does not display the splash page it most likely does not support CPD.
 
- You should then manually trigger openNDS by trying to access a port 80 web site (for example, google.com:80 is a good choice).
+ You should then manually trigger openNDS by trying to access a port 80 web site (for example, http://gnome.org is a good choice).
 
 * To stop openNDS:
 
@@ -49,15 +69,9 @@ OpenWrt
 
     ``opkg remove opennds``
 
-Debian
-******
+Generic Linux
+*************
 
-There isn't a package in the repository (yet). But we have support for a Debian package.
+openNDS and libmicrohttps-ssl can be compiled in place for most distributions of Linux.
 
-Requirements beside Debian tools are:
-
-- libmicrohttpd-dev (>= 0.9.51) [avaiable in **stretch**]
-
-But you can also compile libmicrohttpd your self if you're still running jessie or older.
-
-To compile openNDS and create the Debian package, see the chapter "How to Compile openNDS".
+To compile libmicrohttpd and openNDS, see the chapter "How to Compile and install openNDS".

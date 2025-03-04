@@ -21,14 +21,15 @@
 /** @file auth.h
     @brief Authentication handling thread
     @author Copyright (C) 2004 Alexandre Carmel-Veilleux <acv@miniguru.ca>
+    @author Copyright (C) 2015-2024 Modifications and additions by BlueWave Projects and Services <opennds@blue-wave.net>
 */
 
 #ifndef _AUTH_H_
 #define _AUTH_H_
 
 int auth_client_deauth(unsigned id, const char *reason);
-int auth_client_auth(unsigned id, const char *reason);
-int auth_client_auth_nolock(const unsigned id, const char *reason);
+int auth_client_auth(unsigned id, const char *reason, const char *customdata);
+int auth_client_auth_nolock(const unsigned id, const char *reason, const char *customdata);
 int auth_client_trust(const char *mac);
 int auth_client_untrust(const char *mac);
 int auth_client_allow(const char *mac);

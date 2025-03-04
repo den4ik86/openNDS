@@ -10,9 +10,9 @@ STRIP=yes
 
 NDS_OBJS=src/auth.o src/client_list.o src/commandline.o src/conf.o \
 	src/debug.o src/fw_iptables.o src/main.o src/http_microhttpd.o src/http_microhttpd_utils.o \
-	src/ndsctl_thread.o src/safe.o src/tc.o src/util.o src/template.o
+	src/ndsctl_thread.o src/safe.o src/util.o
 
-.PHONY: all clean install checkastyle fixstyle deb
+.PHONY: all clean install
 
 all: opennds ndsctl
 
@@ -38,59 +38,45 @@ install:
 	cp ndsctl $(DESTDIR)/usr/bin/
 	cp opennds $(DESTDIR)/usr/bin/
 	mkdir -p $(DESTDIR)/etc/opennds/htdocs/images
-	cp resources/opennds.conf $(DESTDIR)/etc/opennds/
-	cp resources/splash.html $(DESTDIR)/etc/opennds/htdocs/
+	mkdir -p $(DESTDIR)/etc/config
+	if [ -e $(DESTDIR)/etc/config/opennds ]; then \
+		cp linux_openwrt/opennds/files/etc/config/opennds $(DESTDIR)/etc/config/opennds.default; \
+	else\
+		cp linux_openwrt/opennds/files/etc/config/opennds $(DESTDIR)/etc/config/; \
+	fi
 	cp resources/splash.css $(DESTDIR)/etc/opennds/htdocs/
-	cp resources/status.html $(DESTDIR)/etc/opennds/htdocs/
 	cp resources/splash.jpg $(DESTDIR)/etc/opennds/htdocs/images/
+	mkdir -p $(DESTDIR)/etc/systemd/system
+	cp resources/opennds.service $(DESTDIR)/etc/systemd/system/
 	mkdir -p $(DESTDIR)/usr/lib/opennds
-	cp forward_authentication_service/PreAuth/demo-preauth.sh $(DESTDIR)/usr/lib/opennds/login.sh
-	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/login.sh
+	cp forward_authentication_service/binauth/custombinauth.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/custombinauth.sh
+	cp forward_authentication_service/binauth/binauth_log.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/binauth_log.sh
+	cp forward_authentication_service/libs/libopennds.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i '0,/#!\/bin\/sh/{s/#!\/bin\/sh/#!\/bin\/bash/}' $(DESTDIR)/usr/lib/opennds/libopennds.sh
+	cp forward_authentication_service/PreAuth/theme_click-to-continue-basic.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/theme_click-to-continue-basic.sh
+	cp forward_authentication_service/PreAuth/theme_click-to-continue-custom-placeholders.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/theme_click-to-continue-custom-placeholders.sh
+	cp forward_authentication_service/PreAuth/theme_user-email-login-basic.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/theme_user-email-login-basic.sh
+	cp forward_authentication_service/PreAuth/theme_user-email-login-custom-placeholders.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/theme_user-email-login-custom-placeholders.sh
 	cp forward_authentication_service/libs/get_client_interface.sh $(DESTDIR)/usr/lib/opennds/
 	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/get_client_interface.sh
-	cp forward_authentication_service/libs/get_client_token.sh $(DESTDIR)/usr/lib/opennds/
-	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/get_client_token.sh
-	cp forward_authentication_service/libs/unescape.sh $(DESTDIR)/usr/lib/opennds/
-	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/unescape.sh
+	cp forward_authentication_service/libs/client_params.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/client_params.sh
 	cp forward_authentication_service/libs/authmon.sh $(DESTDIR)/usr/lib/opennds/
 	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/authmon.sh
+	cp forward_authentication_service/libs/dnsconfig.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/dnsconfig.sh
+	cp forward_authentication_service/libs/download_resources.sh $(DESTDIR)/usr/lib/opennds/
+	sed -i 's/#!\/bin\/sh/#!\/bin\/bash/' $(DESTDIR)/usr/lib/opennds/download_resources.sh
 	cp forward_authentication_service/libs/post-request.php $(DESTDIR)/usr/lib/opennds/
 	cp forward_authentication_service/fas-aes/fas-aes.php $(DESTDIR)/etc/opennds/
+	cp forward_authentication_service/fas-hid/fas-hid.php $(DESTDIR)/etc/opennds/
+	cp forward_authentication_service/fas-hid/fas-hid-https.php $(DESTDIR)/etc/opennds/
 	cp forward_authentication_service/fas-aes/fas-aes-https.php $(DESTDIR)/etc/opennds/
 
 
-
-checkastyle:
-	@command -v astyle >/dev/null 2>&1 || \
-	{ echo >&2 "We need 'astyle' but it's not installed. Aborting."; exit 1; }
-
-checkstyle: checkastyle
-	@if astyle \
-		--dry-run \
-		--lineend=linux \
-		--suffix=none \
-		--style=kr \
-		--indent=force-tab \
-		--formatted --recursive "src/*.c" "src/*.h" | grep -q -i formatted ; then \
-			echo Please fix formatting or run fixstyle ; false ; else \
-			echo Style looks ok. ; fi
-
-fixstyle: checkastyle
-	@echo "\033[1;34mChecking style ...\033[00m"
-	@if astyle \
-		--dry-run \
-		--lineend=linux \
-		--suffix=none \
-		--style=kr \
-		--indent=force-tab \
-		--formatted --recursive "src/*.c" "src/*.h" | grep -q -i formatted ; then \
-			echo "\033[1;33mPrevious files have been corrected\033[00m" ; else \
-			echo "\033[0;32mAll files are ok\033[00m" ; fi
-
-DEBVERSION=$(shell dpkg-parsechangelog | awk -F'[ -]' '/^Version/{print($$2); exit;}' )
-deb: clean
-	mkdir -p dist/opennds-$(DEBVERSION)
-	tar --exclude dist --exclude ".git*" -cf - . | (cd dist/opennds-$(DEBVERSION) && tar xf -)
-	cd dist && tar cjf opennds_$(DEBVERSION).orig.tar.bz2 opennds-$(DEBVERSION) && cd -
-	cd dist/opennds-$(DEBVERSION) && dpkg-buildpackage -us -uc && cd -
-	rm -rf dist/opennds-$(DEBVERSION)

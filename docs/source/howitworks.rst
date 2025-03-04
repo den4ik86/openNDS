@@ -1,5 +1,5 @@
 How openNDS (NDS) works
-###########################
+#######################
 
 openNDS is a Captive Portal Engine. Any Captive Portal, including NDS, will have two main components:
 
@@ -32,38 +32,36 @@ The Thing That Does the Capturing (NDS)
 
  As soon as this initial port 80 request is received on the default gateway interface, NDS will "Capture" it, make a note of the client device identity, allocate a unique token for the client device, then redirect the client browser to the Portal component of NDS.
 
-The Thing That Provides the Portal (Splash, FAS or PreAuth)
-===========================================================
+The Thing That Provides the Portal (FAS, PreAuth, Themespec)
+============================================================
 
- The client browser is redirected to the Portal component. This is a web service that is configured to know how to communicate with the core engine of NDS.
+ The client browser is redirected to the Portal component. This is a web service that is configured to know how to communicate with the core engine of openNDS.
 
- This is commonly known as the Splash Page.
+ This is commonly known as the Splash Page, or more correctly, the entry point to the portal splash page sequence.
 
- NDS has its own web server built in and this can be used to serve the Portal "Splash" pages to the client browser, or a separate web server can be used.
- 
- NDS comes with two standard Splash Page options pre-installed.
+ openNDS has its own web server built in and this can be used to serve the Portal "Splash" pages to the client browser, or a separate web server can be used.
 
- One provides a trivial Click to Continue splash page with template variables and the other provides a Client User form requiring Name and Email address to be entered.
+ openNDS comes with numerous standard Splash Page Sequence options pre-installed.
 
- Both of these can be customised or a complete specialised Portal can be written by the installer (See FAS, PreAuth).
+ One provides a trivial Click to Continue splash page and another provides a Client User form requiring Name and Email address to be entered.
 
- FAS, or Forward Authentication Service may use the web server embedded in NDS, a separate web server installed on the NDS router, a web server residing on the local network or an Internet hosted web server.
+ All of these can be customised or a complete specialised Portal can be written by the installer (See FAS, PreAuth, Themespec).
+
+ FAS, or Forward Authentication Service may use the web server embedded in openNDS, a separate web server installed on the NDS router, a web server residing on the local network or an Internet hosted web server.
 
  The user of the client device will always be expected to complete some actions on the splash page.
 
  Once the user on the client device has successfully completed the splash page actions, that page then links directly back to NDS.
 
- For security, NDS expects to receive the same valid token it allocated when the client issued its initial port 80 request. If the token received is valid, NDS then "authenticates" the client device, allowing access to the Internet.
+ For security, NDS expects to receive valid verification of the client. If the verification is valid, openNDS then "authenticates" the client device, allowing access to the Internet. openNDS uses various methods of encryption to ensure verification cannot be bypassed.
 
- Post authentication processing extensions may be added to NDS (See BinAuth). Once NDS has received a valid token it calls a BinAuth script.
+ Post authentication processing extensions may be added to openNDS (See BinAuth). Once openNDS has authenticated a client, it calls a BinAuth script if enabled.
 
- If the BinAuth script returns positively (ie return code 0), NDS then "authenticates" the client device, allowing access to the Internet.
-
- Where FAS is used, secure modes are provided (levels 1 and 2), where the client token and other required variables are kept securely hidden from the Client, ensuring verification cannot be bypassed.
+ Typically, BinAuth is used to provide a local log of authenticated clients. In addition the BinAuth script can override client authentication if required.
 
 .. note::
 
- FAS and Binauth can be enabled together. This can give great flexibility, with FAS providing remote verification and Binauth providing local post authentication processing closely linked to  NDS.
+ FAS and Binauth can be enabled together. This can give great flexibility, with FAS providing remote verification and Binauth providing local post authentication processing closely linked to openNDS.
 
 
 Captive Portal Detection (CPD)
@@ -116,6 +114,27 @@ The best solution is to set the session timeout to a value greater than the expe
 
 Staff at the venue could have their devices added to the Trusted List if appropriate, but experience shows, it is better not to do this as they very soon learn what to do and can help guests who encounter the issue. (Anything that reduces support calls is good!)
 
+Captive Portal Identification (CPI) (RFC 8910)
+**********************************************
+
+Captive Portal Identification is an alternative method of triggering the Portal "Splash" page without having to capture the attempted port 80 access that CPD does.
+
+Instead of waiting for the client to test for Internet access using its vendor specified detection URL, openNDS sends the end point URL of its own Portal using DHCP option 114 (default-url).
+
+Any clients supporting this method will open their CPD browser pointing at the specified URL instead of waiting for a redirection.
+
+This is a new and somewhat experimental standard but at the time of writing (September 2022) an increasing number of new clients are beginning to support it as their implementations of the standard mature.
+
+This method is enabled in openNDS by default, but can be disabled (see "Dhcp option 114 Enable - RFC8910" in the Configuration Options section).
+
+Captive Portal Identification With Portal API (RFC 8910 / RFC 8908)
+*******************************************************************
+
+The RFC8908 Captive Portal API extends Captive Portal Identification by adding an API by which a client device can access the Portal.
+This is supported in openNDS from version 9.5.0 onwards.
+
+At the time of writing (September 2022), very few client devices support this API.
+
 Network Zone Detection (Where is the Client Connected?)
 *******************************************************
 
@@ -137,21 +156,19 @@ NDS detects which zone is being used by a client and a relevant login page can b
 Packet filtering
 ****************
 
-openNDS considers four kinds of packets coming into the router over the managed interface. Each packet is one of these kinds:
+openNDS considers three kinds of packets coming into the router over the managed interface. Each packet is one of these kinds:
 
- 1. **Blocked**, if the MAC mechanism is block, and the source MAC address of the packet matches one listed in the BlockedMACList; or if the MAC mechanism is allow, and source MAC address of the packet does not match one listed in the AllowedMACList or the TrustedMACList. These packets are dropped.
- 2. **Trusted**, if the source MAC address of the packet matches one listed in the TrustedMACList. By default, these packets are accepted and routed to all destination addresses and ports. If desired, this behavior can be customized by FirewallRuleSet trusted-users and FirewallRuleSet trusted-users-to-router lists in the opennds.conf configuration file, or by the EmptyRuleSetPolicy trusted-users EmptyRuleSetPolicy trusted-users-to-router directives.
- 3. **Authenticated**, if the packet's IP and MAC source addresses have gone through the openNDS authentication process and has not yet expired. These packets are accepted and routed to a limited set of addresses and ports (see FirewallRuleSet authenticated-users and FirewallRuleSet users-to-router in the opennds.conf configuration file).
- 4. **Preauthenticated**. Any other packet. These packets are accepted and routed to a limited set of addresses and ports (see FirewallRuleSet      preauthenticated-users and FirewallRuleSet users-to-router in the opennds.conf configuration file). Any other packet is dropped, except that a packet for destination port 80 at any address is redirected to port 2050 on the router, where openNDS's built in libhttpd-based web server is listening. This begins the 'authentication' process. The server will serve a splash page back to the source IP address of the packet. The user clicking the appropriate link on the splash page will complete the process, causing future packets from this IP/MAC address to be marked as Authenticated until the inactive or forced timeout is reached, and its packets revert to being Preauthenticated.
+  1. **Trusted**, if the source MAC address of the packet matches one listed in the TrustedMACList. By default, these packets are accepted and routed to all destination addresses and ports. Trusted clients are granted immediate and unconditional access and do not require authentication. Trusted client data usage is not recorded and no quotas or timeouts are applied.
 
+  2. **Authenticated**, if the packet's IP and MAC source addresses have gone through the openNDS validation/authentication process or the pre-emptive authentication process and has not yet expired. 
 
-openNDS implements these actions by inserting rules in the router's iptables mangle PREROUTING chain to mark packets, and by inserting rules in the nat PREROUTING, filter INPUT and filter FORWARD chains which match on those marks.
+  3. **Preauthenticated**. Any other packet. These packets are accepted and routed to a limited set of addresses and ports (see preauthenticated-users and users-to-router in the opennds configuration file). Any other packet is dropped, except that a packet for destination port 80 at any address is redirected to port 2050 on the router, where openNDS's built in MHD based web server is listening. This begins the 'authentication' process. The server will serve a splash page back to the source IP address of the packet. The user completing the appropriate forms on the splash page sequence will complete the process, causing future packets from this IP/MAC address to be marked as Authenticated until the inactive or forced timeout limits are reached.
 
-Because it inserts its rules at the beginning of existing chains, openNDS should be insensitive to most typical existing firewall configurations.
+Data volume and Rate Quotas
+***************************
 
-Traffic control
-***************
+openNDS (NDS) has built in *Data Volume* and *Data Rate* quota support.
 
-Data rate control on an IP connection basis can be achieved using Smart Queue Management (SQM) configured separately, with NDS being fully compatible.
+Data volume and data rate quotas can be set globally in the config file.
 
-It should be noted that while setup options and BinAuth do accept traffic/quota settings, these values currently have no effect and are reserved for future development.
+The global values can be overridden on a client by client basis as required.
