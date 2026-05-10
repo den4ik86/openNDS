@@ -1453,10 +1453,11 @@ static char *construct_querystring(struct MHD_Connection *connection, t_client *
 	}
 
 	if (config->fas_secure_enabled == 0) {
-		snprintf(querystr, QUERYMAXLEN, "?clientip=%s&gatewayname=%s&tok=%s&redir=%s",
+		snprintf(querystr, QUERYMAXLEN, "?clientip=%s&gatewayname=%s&tok=%s&redir=%s&mac=%s",
 			client->ip,
 			config->url_encoded_gw_name,
 			client->token,
+			client->mac,
 			originurl
 		);
 
